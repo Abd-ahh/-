@@ -33,7 +33,7 @@ export async function extractPassportData(
   imageBase64: string,
   mimeType: string
 ): Promise<PassportExtractionResult> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`
 
   const body = {
     contents: [
