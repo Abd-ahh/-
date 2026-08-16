@@ -3,6 +3,31 @@ axios.defaults.headers.common['Authorization'] = 'Bearer ' + (localStorage.getIt
 
 const API = '/api/customer';
 let currentTab = 'overview';
+let fieldsCache = [];
+let numbersCache = [];
+
+// ---------------- Copy to clipboard helper ----------------
+window.copyValue = function (value, btnEl) {
+  if (!value) return;
+  navigator.clipboard.writeText(String(value)).then(() => {
+    if (!btnEl) return;
+    const original = btnEl.innerHTML;
+    btnEl.innerHTML = '<i class="fa-solid fa-check text-emerald-500"></i>';
+    setTimeout(() => { btnEl.innerHTML = original; }, 1200);
+  }).catch(() => alert('تعذر النسخ'));
+};
+
+function copyBtn(value) {
+  if (!value) return '';
+  return `<button onclick='copyValue(${JSON.stringify(String(value))}, this)' title="نسخ" class="text-gray-400 hover:text-brand-600 px-1"><i class="fa-regular fa-copy"></i></button>`;
+}
+
+async function getFields() {
+  if (fieldsCache.length) return fieldsCache;
+  const { data } = await axios.get(`${API}/fields`);
+  fieldsCache = data.fields;
+  return fieldsCache;
+}
 
 function guardAuth(err) {
   if (err?.response?.status === 401) {
@@ -130,11 +155,12 @@ function statMini(label, value) {
 
 async function renderNumbers(area) {
   const { data } = await axios.get(`${API}/dashboard`);
+  numbersCache = data.numbers;
   area.innerHTML = `
     <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
       <table class="w-full text-sm">
         <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
-          <th class="p-4 font-medium">الاسم</th><th class="p-4 font-medium">الرقم</th><th class="p-4 font-medium">الحالة</th>
+          <th class="p-4 font-medium">الاسم</th><th class="p-4 font-medium">الرقم</th><th class="p-4 font-medium">الحالة</th><th class="p-4 font-medium">إعدادات الاستخراج</th>
         </tr></thead>
         <tbody>
           ${data.numbers.map(n => `
@@ -142,12 +168,54 @@ async function renderNumbers(area) {
               <td class="p-4 font-semibold">${n.display_name}</td>
               <td class="p-4">${n.phone_number}</td>
               <td class="p-4">${statusBadge(n.status)}</td>
-            </tr>`).join('') || '<tr><td colspan="3" class="p-8 text-center text-gray-400">لا توجد أرقام مربوطة بعد. تواصل مع الدعم لربط رقمك.</td></tr>'}
+              <td class="p-4"><button onclick="openFieldsModal(${n.id})" class="text-brand-600 hover:underline text-xs font-bold">تخصيص الحقول</button></td>
+            </tr>`).join('') || '<tr><td colspan="4" class="p-8 text-center text-gray-400">لا توجد أرقام مربوطة بعد. تواصل مع الدعم لربط رقمك.</td></tr>'}
         </tbody>
       </table>
     </div>
+    <div id="modal-root"></div>
   `;
 }
+
+// ---------------- Extraction fields modal ----------------
+window.openFieldsModal = async function (numberId) {
+  const fields = await getFields();
+  const n = numbersCache.find(x => x.id === numberId);
+  let currentFields = [];
+  try { currentFields = n && n.extraction_fields ? JSON.parse(n.extraction_fields) : []; } catch { currentFields = []; }
+
+  const modal = document.getElementById('modal-root');
+  modal.innerHTML = `
+    <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-2xl p-6 w-full max-w-md">
+        <h3 class="font-bold text-lg mb-1">حقول استخراج البوت — ${n ? n.display_name : ''}</h3>
+        <p class="text-xs text-gray-400 mb-4">اختر البيانات التي يستخرجها البوت ويرد بها على واتساب لهذا الرقم فقط. اترك الكل بدون تحديد لاستخراج جميع الحقول.</p>
+        <div class="grid grid-cols-2 gap-2">
+          ${fields.map(f => `
+            <label class="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2 text-sm cursor-pointer">
+              <input type="checkbox" class="cf-field-cb" value="${f.key}" ${currentFields.includes(f.key) ? 'checked' : ''} />
+              <span>${f.emoji} ${f.label_ar}</span>
+            </label>`).join('')}
+        </div>
+        <div class="flex gap-3 mt-5">
+          <button onclick="saveNumberFields(${numberId})" class="flex-1 bg-brand-600 text-white font-bold py-2.5 rounded-xl">حفظ</button>
+          <button onclick="document.getElementById('modal-root').innerHTML=''" class="flex-1 bg-gray-100 text-gray-700 font-bold py-2.5 rounded-xl">إلغاء</button>
+        </div>
+      </div>
+    </div>
+  `;
+};
+
+window.saveNumberFields = async function (numberId) {
+  const selectedFields = Array.from(document.querySelectorAll('.cf-field-cb:checked')).map(cb => cb.value);
+  try {
+    await axios.put(`${API}/numbers/${numberId}/fields`, { extraction_fields: selectedFields.length ? selectedFields : null });
+    document.getElementById('modal-root').innerHTML = '';
+    render();
+  } catch (err) {
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
 
 async function renderOperations(area) {
   const { data } = await axios.get(`${API}/operations`);
@@ -162,8 +230,8 @@ async function renderOperations(area) {
           ${data.operations.map(o => `
             <tr class="border-b border-gray-50">
               <td class="p-4 text-gray-400 text-xs">${o.phone_number || '-'}</td>
-              <td class="p-4 font-semibold">${o.full_name_ar || '-'}</td>
-              <td class="p-4 text-gray-500">${o.passport_number || '-'}</td>
+              <td class="p-4 font-semibold">${o.full_name_ar ? `<span class="inline-flex items-center gap-1">${o.full_name_ar} ${copyBtn(o.full_name_ar)}</span>` : '-'}</td>
+              <td class="p-4 text-gray-500">${o.passport_number ? `<span class="inline-flex items-center gap-1">${o.passport_number} ${copyBtn(o.passport_number)}</span>` : '-'}</td>
               <td class="p-4">${statusBadge(o.status)}</td>
               <td class="p-4 text-gray-400 text-xs">${fmtDate(o.created_at)}</td>
             </tr>`).join('') || '<tr><td colspan="5" class="p-8 text-center text-gray-400">لا توجد عمليات بعد</td></tr>'}

@@ -2,10 +2,18 @@ import { Hono } from 'hono'
 import { requireAdmin } from '../lib/middleware'
 import { hashPassword } from '../lib/auth'
 import { extractPassportData } from '../lib/gemini'
+import { AVAILABLE_FIELDS, normalizeExtractionFields } from '../lib/fields'
 import type { AppEnv } from '../lib/types'
 
 const admin = new Hono<AppEnv>()
 admin.use('/*', requireAdmin)
+
+// ---------------------- Available extraction fields ----------------------
+// Used by the frontend to render the field-selection checkboxes when
+// creating/editing a WhatsApp number.
+admin.get('/fields', (c) => {
+  return c.json({ fields: AVAILABLE_FIELDS })
+})
 
 // ---------------------- Passport extraction test tool ----------------------
 // Lets the platform owner validate Gemini's Arabic-name extraction accuracy
@@ -211,7 +219,7 @@ admin.get('/whatsapp-numbers', async (c) => {
 
 admin.post('/whatsapp-numbers', async (c) => {
   const { DB } = c.env
-  const { customer_id, display_name, phone_number, phone_number_id, waba_id, access_token } = await c.req.json()
+  const { customer_id, display_name, phone_number, phone_number_id, waba_id, access_token, extraction_fields } = await c.req.json()
   if (!customer_id || !display_name || !phone_number) return c.json({ error: 'بيانات ناقصة' }, 400)
 
   // Enforce max_numbers limit from active subscription
@@ -226,9 +234,17 @@ admin.post('/whatsapp-numbers', async (c) => {
   }
 
   const result = await DB.prepare(
-    `INSERT INTO whatsapp_numbers (customer_id, display_name, phone_number, phone_number_id, waba_id, access_token, status)
-     VALUES (?, ?, ?, ?, ?, ?, 'connected')`
-  ).bind(customer_id, display_name, phone_number, phone_number_id || null, waba_id || null, access_token || null).run()
+    `INSERT INTO whatsapp_numbers (customer_id, display_name, phone_number, phone_number_id, waba_id, access_token, extraction_fields, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'connected')`
+  ).bind(
+    customer_id,
+    display_name,
+    phone_number,
+    phone_number_id || null,
+    waba_id || null,
+    access_token || null,
+    normalizeExtractionFields(extraction_fields)
+  ).run()
 
   return c.json({ success: true, id: result.meta.last_row_id })
 })
@@ -236,10 +252,25 @@ admin.post('/whatsapp-numbers', async (c) => {
 admin.put('/whatsapp-numbers/:id', async (c) => {
   const { DB } = c.env
   const id = c.req.param('id')
-  const { display_name, phone_number_id, waba_id, access_token, status } = await c.req.json()
+  const existing = await DB.prepare('SELECT * FROM whatsapp_numbers WHERE id = ?').bind(id).first<any>()
+  if (!existing) return c.json({ error: 'الرقم غير موجود' }, 404)
+
+  const body = await c.req.json()
+  // Partial update: only overwrite fields explicitly present in the request body,
+  // keep everything else as-is (e.g. saving extraction_fields alone from the
+  // "حقول الاستخراج" modal must not wipe display_name/access_token/etc.)
+  const display_name = 'display_name' in body ? body.display_name : existing.display_name
+  const phone_number_id = 'phone_number_id' in body ? (body.phone_number_id || null) : existing.phone_number_id
+  const waba_id = 'waba_id' in body ? (body.waba_id || null) : existing.waba_id
+  const access_token = 'access_token' in body ? (body.access_token || null) : existing.access_token
+  const status = 'status' in body ? (body.status || 'connected') : existing.status
+  const extraction_fields = 'extraction_fields' in body
+    ? normalizeExtractionFields(body.extraction_fields)
+    : existing.extraction_fields
+
   await DB.prepare(
-    'UPDATE whatsapp_numbers SET display_name=?, phone_number_id=?, waba_id=?, access_token=?, status=? WHERE id=?'
-  ).bind(display_name, phone_number_id || null, waba_id || null, access_token || null, status || 'connected', id).run()
+    'UPDATE whatsapp_numbers SET display_name=?, phone_number_id=?, waba_id=?, access_token=?, status=?, extraction_fields=? WHERE id=?'
+  ).bind(display_name, phone_number_id, waba_id, access_token, status, extraction_fields, id).run()
   return c.json({ success: true })
 })
 

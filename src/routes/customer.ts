@@ -1,9 +1,15 @@
 import { Hono } from 'hono'
 import { requireCustomer } from '../lib/middleware'
+import { AVAILABLE_FIELDS, normalizeExtractionFields } from '../lib/fields'
 import type { AppEnv } from '../lib/types'
 
 const customer = new Hono<AppEnv>()
 customer.use('/*', requireCustomer)
+
+// Available extraction fields, used to render the field-selection checkboxes
+customer.get('/fields', (c) => {
+  return c.json({ fields: AVAILABLE_FIELDS })
+})
 
 customer.get('/me', async (c) => {
   const { DB } = c.env
@@ -18,7 +24,7 @@ customer.get('/dashboard', async (c) => {
 
   // Never expose access_token to the customer portal (sensitive Meta credential)
   const numbers = await DB.prepare(
-    'SELECT id, customer_id, display_name, phone_number, phone_number_id, waba_id, status, created_at FROM whatsapp_numbers WHERE customer_id = ? ORDER BY created_at DESC'
+    'SELECT id, customer_id, display_name, phone_number, phone_number_id, waba_id, status, extraction_fields, created_at FROM whatsapp_numbers WHERE customer_id = ? ORDER BY created_at DESC'
   ).bind(id).all()
 
   const activeSub = await DB.prepare(
@@ -48,6 +54,27 @@ customer.get('/dashboard', async (c) => {
     operations_stats: opsStats,
     recent_operations: recentOps.results
   })
+})
+
+// Let the customer choose which fields the bot extracts/replies with for a
+// specific WhatsApp number they own (e.g. "name only" vs "all fields").
+customer.put('/numbers/:id/fields', async (c) => {
+  const { DB } = c.env
+  const customerId = c.get('customer')!.id
+  const numberId = c.req.param('id')
+  const { extraction_fields } = await c.req.json()
+
+  // Ownership check: make sure this number belongs to the logged-in customer
+  const owned = await DB.prepare('SELECT id FROM whatsapp_numbers WHERE id = ? AND customer_id = ?')
+    .bind(numberId, customerId)
+    .first()
+  if (!owned) return c.json({ error: 'الرقم غير موجود أو لا يخصك' }, 404)
+
+  await DB.prepare('UPDATE whatsapp_numbers SET extraction_fields = ? WHERE id = ?')
+    .bind(normalizeExtractionFields(extraction_fields), numberId)
+    .run()
+
+  return c.json({ success: true })
 })
 
 customer.put('/settings', async (c) => {

@@ -60,6 +60,7 @@ export interface WhatsAppNumberRow {
   waba_id: string | null
   access_token: string | null
   status: string
+  extraction_fields: string | null // JSON array of field keys, null = all fields
   created_at: string
 }
 

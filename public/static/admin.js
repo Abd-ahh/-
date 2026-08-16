@@ -6,6 +6,30 @@ let currentTab = 'overview';
 let packagesCache = [];
 let customersCache = [];
 let numbersCache = [];
+let fieldsCache = [];
+
+// ---------------- Copy to clipboard helper ----------------
+window.copyValue = function (value, btnEl) {
+  if (!value) return;
+  navigator.clipboard.writeText(String(value)).then(() => {
+    if (!btnEl) return;
+    const original = btnEl.innerHTML;
+    btnEl.innerHTML = '<i class="fa-solid fa-check text-emerald-500"></i>';
+    setTimeout(() => { btnEl.innerHTML = original; }, 1200);
+  }).catch(() => alert('تعذر النسخ'));
+};
+
+function copyBtn(value) {
+  if (!value) return '';
+  return `<button onclick='copyValue(${JSON.stringify(String(value))}, this)' title="نسخ" class="text-gray-400 hover:text-brand-600 px-1"><i class="fa-regular fa-copy"></i></button>`;
+}
+
+async function getFields() {
+  if (fieldsCache.length) return fieldsCache;
+  const { data } = await axios.get(`${API}/fields`);
+  fieldsCache = data.fields;
+  return fieldsCache;
+}
 
 function guardAuth(err) {
   if (err?.response?.status === 401) {
@@ -390,7 +414,8 @@ async function renderNumbers(area) {
               <td class="p-4 text-gray-500">${n.customer_name}</td>
               <td class="p-4 text-gray-400 text-xs">${n.phone_number_id || '-'}</td>
               <td class="p-4">${statusBadge(n.status)}</td>
-              <td class="p-4">
+              <td class="p-4 flex gap-3">
+                <button onclick="openFieldsModal(${n.id})" class="text-brand-600 hover:underline text-xs font-bold">حقول الاستخراج</button>
                 <button onclick="deleteNumber(${n.id})" class="text-red-500 hover:underline text-xs font-bold">حذف</button>
               </td>
             </tr>`).join('') || '<tr><td colspan="6" class="p-8 text-center text-gray-400">لا توجد أرقام مربوطة</td></tr>'}
@@ -401,11 +426,12 @@ async function renderNumbers(area) {
   `;
 }
 
-window.openNumberModal = function () {
+window.openNumberModal = async function () {
+  const fields = await getFields();
   const modal = document.getElementById('modal-root');
   modal.innerHTML = `
     <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div class="bg-white rounded-2xl p-6 w-full max-w-lg">
+      <div class="bg-white rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto">
         <h3 class="font-bold text-lg mb-1">ربط رقم واتساب جديد</h3>
         <p class="text-xs text-gray-400 mb-4">تحتاج بيانات WhatsApp Business Cloud API من Meta for Developers</p>
         <div class="space-y-3">
@@ -418,6 +444,17 @@ window.openNumberModal = function () {
           <input id="wn-waba" placeholder="WhatsApp Business Account ID (اختياري)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
           <input id="wn-token" type="password" placeholder="Access Token (System User Token)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
         </div>
+        <div class="mt-4">
+          <p class="text-sm font-bold text-gray-700 mb-2">الحقول التي يستخرجها البوت لهذا الرقم</p>
+          <p class="text-xs text-gray-400 mb-3">اترك الكل بدون تحديد لاستخراج جميع الحقول، أو اختر فقط ما تحتاجه (مثال: الاسم فقط)</p>
+          <div class="grid grid-cols-2 gap-2">
+            ${fields.map(f => `
+              <label class="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2 text-sm cursor-pointer">
+                <input type="checkbox" class="wn-field-cb" value="${f.key}" />
+                <span>${f.emoji} ${f.label_ar}</span>
+              </label>`).join('')}
+          </div>
+        </div>
         <div id="wn-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-3"></div>
         <div class="flex gap-3 mt-5">
           <button onclick="submitNumber()" class="flex-1 bg-brand-600 text-white font-bold py-2.5 rounded-xl">ربط الرقم</button>
@@ -429,13 +466,15 @@ window.openNumberModal = function () {
 };
 
 window.submitNumber = async function () {
+  const selectedFields = Array.from(document.querySelectorAll('.wn-field-cb:checked')).map(cb => cb.value);
   const payload = {
     customer_id: document.getElementById('wn-customer').value,
     display_name: document.getElementById('wn-name').value,
     phone_number: document.getElementById('wn-phone').value,
     phone_number_id: document.getElementById('wn-pnid').value,
     waba_id: document.getElementById('wn-waba').value,
-    access_token: document.getElementById('wn-token').value
+    access_token: document.getElementById('wn-token').value,
+    extraction_fields: selectedFields.length ? selectedFields : null
   };
   try {
     await axios.post(`${API}/whatsapp-numbers`, payload);
@@ -445,6 +484,46 @@ window.submitNumber = async function () {
     const el = document.getElementById('wn-error');
     el.textContent = err?.response?.data?.error || 'حدث خطأ';
     el.classList.remove('hidden');
+  }
+};
+
+// ---------------- Extraction fields modal (edit existing number) ----------------
+window.openFieldsModal = async function (numberId) {
+  const fields = await getFields();
+  const n = numbersCache.find(x => x.id === numberId);
+  let currentFields = [];
+  try { currentFields = n && n.extraction_fields ? JSON.parse(n.extraction_fields) : []; } catch { currentFields = []; }
+
+  const modal = document.getElementById('modal-root');
+  modal.innerHTML = `
+    <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-2xl p-6 w-full max-w-md">
+        <h3 class="font-bold text-lg mb-1">حقول الاستخراج — ${n ? n.display_name : ''}</h3>
+        <p class="text-xs text-gray-400 mb-4">اترك الكل بدون تحديد لاستخراج جميع الحقول، أو اختر فقط ما تحتاجه (مثال: الاسم فقط)</p>
+        <div class="grid grid-cols-2 gap-2">
+          ${fields.map(f => `
+            <label class="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2 text-sm cursor-pointer">
+              <input type="checkbox" class="wnf-field-cb" value="${f.key}" ${currentFields.includes(f.key) ? 'checked' : ''} />
+              <span>${f.emoji} ${f.label_ar}</span>
+            </label>`).join('')}
+        </div>
+        <div class="flex gap-3 mt-5">
+          <button onclick="saveNumberFields(${numberId})" class="flex-1 bg-brand-600 text-white font-bold py-2.5 rounded-xl">حفظ</button>
+          <button onclick="closeModal()" class="flex-1 bg-gray-100 text-gray-700 font-bold py-2.5 rounded-xl">إلغاء</button>
+        </div>
+      </div>
+    </div>
+  `;
+};
+
+window.saveNumberFields = async function (numberId) {
+  const selectedFields = Array.from(document.querySelectorAll('.wnf-field-cb:checked')).map(cb => cb.value);
+  try {
+    await axios.put(`${API}/whatsapp-numbers/${numberId}`, { extraction_fields: selectedFields.length ? selectedFields : null });
+    closeModal();
+    render();
+  } catch (err) {
+    alert(err?.response?.data?.error || 'حدث خطأ');
   }
 };
 
@@ -470,8 +549,8 @@ async function renderOperations(area) {
             <tr class="border-b border-gray-50 hover:bg-gray-50">
               <td class="p-4">${o.customer_name || '-'}</td>
               <td class="p-4 text-gray-400 text-xs">${o.phone_number || '-'}</td>
-              <td class="p-4 font-semibold">${o.full_name_ar || '-'}</td>
-              <td class="p-4 text-gray-500">${o.passport_number || '-'}</td>
+              <td class="p-4 font-semibold">${o.full_name_ar ? `<span class="inline-flex items-center gap-1">${o.full_name_ar} ${copyBtn(o.full_name_ar)}</span>` : '-'}</td>
+              <td class="p-4 text-gray-500">${o.passport_number ? `<span class="inline-flex items-center gap-1">${o.passport_number} ${copyBtn(o.passport_number)}</span>` : '-'}</td>
               <td class="p-4">${statusBadge(o.status)}</td>
               <td class="p-4 text-xs text-gray-400">${o.source === 'whatsapp' ? 'واتساب' : 'اختبار'}</td>
               <td class="p-4 text-gray-400 text-xs">${fmtDate(o.created_at)}</td>

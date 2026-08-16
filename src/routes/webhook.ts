@@ -3,6 +3,7 @@ import type { AppEnv } from '../lib/types'
 import type { WhatsAppWebhookBody } from '../lib/whatsapp'
 import { downloadMedia, sendTextMessage, markMessageRead } from '../lib/whatsapp'
 import { extractPassportData } from '../lib/gemini'
+import { AVAILABLE_FIELDS, parseExtractionFields } from '../lib/fields'
 
 const webhook = new Hono<AppEnv>()
 
@@ -108,7 +109,7 @@ async function handleIncomingMessage(params: {
         unclear: (reason: string) => `⚠️ Image is not clear enough: ${reason || 'please resend a clearer photo of the passport.'}`,
         notPassport: '⚠️ This does not appear to be a passport page. Please send a clear photo of the passport data page.',
         error: '❌ An error occurred while processing the image. Please try again.',
-        result: (r: any) => buildResultMessage(r, 'en')
+        result: (r: any) => buildResultMessage(r, 'en', numberRow.extraction_fields)
       }
     : {
         notImage: '👋 من فضلك أرسل صورة واضحة لصفحة بيانات الجواز حتى نتمكن من استخراج المعلومات.',
@@ -117,7 +118,7 @@ async function handleIncomingMessage(params: {
         unclear: (reason: string) => `⚠️ الصورة غير واضحة بشكل كافٍ: ${reason || 'يرجى إرسال صورة أوضح للجواز.'}`,
         notPassport: '⚠️ يبدو أن هذه الصورة ليست صفحة جواز سفر. يرجى إرسال صورة واضحة لصفحة بيانات الجواز.',
         error: '❌ حدث خطأ أثناء معالجة الصورة، يرجى المحاولة مرة أخرى.',
-        result: (r: any) => buildResultMessage(r, 'ar')
+        result: (r: any) => buildResultMessage(r, 'ar', numberRow.extraction_fields)
       }
 
   // Non-image messages -> friendly guidance
@@ -214,32 +215,25 @@ async function handleIncomingMessage(params: {
   }
 }
 
-function buildResultMessage(r: any, lang: 'ar' | 'en'): string {
-  if (lang === 'en') {
-    const lines = [
-      '✅ Passport data extracted successfully:',
-      '',
-      r.full_name_ar ? `👤 Name (Arabic): ${r.full_name_ar}` : '',
-      r.full_name_en ? `👤 Name (English): ${r.full_name_en}` : '',
-      r.passport_number ? `🛂 Passport No.: ${r.passport_number}` : '',
-      r.nationality ? `🌍 Nationality: ${r.nationality}` : '',
-      r.date_of_birth ? `🎂 Date of Birth: ${r.date_of_birth}` : '',
-      r.date_of_expiry ? `📅 Expiry Date: ${r.date_of_expiry}` : '',
-      r.gender ? `⚧ Gender: ${r.gender}` : ''
-    ].filter(Boolean)
-    return lines.join('\n')
+// Builds the WhatsApp reply text, restricted to the fields configured for this
+// number (extraction_fields JSON column; null/empty = all fields, default).
+// Each value is wrapped in ``` (monospace) on its own line so the recipient
+// can long-press just that line in WhatsApp and tap "Copy" — WhatsApp has no
+// native "copy button" API for business messages, so this is the closest
+// practical equivalent.
+function buildResultMessage(r: any, lang: 'ar' | 'en', extractionFieldsRaw: string | null): string {
+  const allowedKeys = parseExtractionFields(extractionFieldsRaw)
+  const fieldsToShow = AVAILABLE_FIELDS.filter((f) => allowedKeys.includes(f.key) && r[f.key])
+
+  const header = lang === 'en' ? '✅ Passport data extracted successfully:' : '✅ تم استخراج بيانات الجواز بنجاح:'
+  const lines = [header, '']
+
+  for (const f of fieldsToShow) {
+    const label = lang === 'en' ? f.label_en : f.label_ar
+    lines.push(`${f.emoji} ${label}:`)
+    lines.push('```' + r[f.key] + '```')
   }
-  const lines = [
-    '✅ تم استخراج بيانات الجواز بنجاح:',
-    '',
-    r.full_name_ar ? `👤 الاسم بالعربي: ${r.full_name_ar}` : '',
-    r.full_name_en ? `👤 الاسم بالإنجليزي: ${r.full_name_en}` : '',
-    r.passport_number ? `🛂 رقم الجواز: ${r.passport_number}` : '',
-    r.nationality ? `🌍 الجنسية: ${r.nationality}` : '',
-    r.date_of_birth ? `🎂 تاريخ الميلاد: ${r.date_of_birth}` : '',
-    r.date_of_expiry ? `📅 تاريخ الانتهاء: ${r.date_of_expiry}` : '',
-    r.gender ? `⚧ الجنس: ${r.gender}` : ''
-  ].filter(Boolean)
+
   return lines.join('\n')
 }
 
