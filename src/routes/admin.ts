@@ -281,6 +281,7 @@ admin.put('/whatsapp-numbers/:id', async (c) => {
   // keep everything else as-is (e.g. saving extraction_fields alone from the
   // "حقول الاستخراج" modal must not wipe display_name/access_token/etc.)
   const display_name = 'display_name' in body ? body.display_name : existing.display_name
+  const phone_number = 'phone_number' in body ? (body.phone_number || existing.phone_number) : existing.phone_number
   const phone_number_id = 'phone_number_id' in body ? (body.phone_number_id || null) : existing.phone_number_id
   const waba_id = 'waba_id' in body ? (body.waba_id || null) : existing.waba_id
   const access_token = 'access_token' in body ? (body.access_token || null) : existing.access_token
@@ -290,8 +291,8 @@ admin.put('/whatsapp-numbers/:id', async (c) => {
     : existing.extraction_fields
 
   await DB.prepare(
-    'UPDATE whatsapp_numbers SET display_name=?, phone_number_id=?, waba_id=?, access_token=?, status=?, extraction_fields=? WHERE id=?'
-  ).bind(display_name, phone_number_id, waba_id, access_token, status, extraction_fields, id).run()
+    'UPDATE whatsapp_numbers SET display_name=?, phone_number=?, phone_number_id=?, waba_id=?, access_token=?, status=?, extraction_fields=? WHERE id=?'
+  ).bind(display_name, phone_number, phone_number_id, waba_id, access_token, status, extraction_fields, id).run()
   return c.json({ success: true })
 })
 
