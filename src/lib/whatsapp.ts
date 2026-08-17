@@ -81,6 +81,35 @@ export async function fetchPhoneNumbersForWaba(
   return (json.data || []) as WabaPhoneNumber[]
 }
 
+// Keep digits only, so "+967 77 826 0004", "00967778260004" and "967778260004"
+// all normalize to the same comparable string regardless of how the admin typed it.
+export function normalizePhoneDigits(phone: string): string {
+  return (phone || '').replace(/\D/g, '')
+}
+
+// Match a plain customer phone number (as typed by the admin, any format) against
+// the list of numbers Meta returns for a WABA. Handles missing/extra leading
+// country-code zeros by comparing digit suffixes, not just exact equality.
+export function findMatchingWabaNumber(
+  numbers: WabaPhoneNumber[],
+  phoneNumber: string
+): WabaPhoneNumber | null {
+  const target = normalizePhoneDigits(phoneNumber)
+  if (!target) return null
+  // 1) exact digit match first
+  let match = numbers.find((n) => normalizePhoneDigits(n.display_phone_number) === target)
+  if (match) return match
+  // 2) fallback: suffix match (handles missing/extra leading 0 or country code),
+  // require a reasonably long overlap to avoid false positives
+  const minLen = 7
+  match = numbers.find((n) => {
+    const d = normalizePhoneDigits(n.display_phone_number)
+    if (d.length < minLen || target.length < minLen) return false
+    return d.endsWith(target) || target.endsWith(d)
+  })
+  return match || null
+}
+
 export interface MediaDownloadResult {
   base64: string
   mimeType: string

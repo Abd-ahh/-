@@ -3,7 +3,7 @@ import { requireAdmin } from '../lib/middleware'
 import { hashPassword } from '../lib/auth'
 import { extractPassportData } from '../lib/gemini'
 import { AVAILABLE_FIELDS, normalizeExtractionFields } from '../lib/fields'
-import { fetchPhoneNumbersForWaba } from '../lib/whatsapp'
+import { fetchPhoneNumbersForWaba, findMatchingWabaNumber } from '../lib/whatsapp'
 import type { AppEnv } from '../lib/types'
 
 const admin = new Hono<AppEnv>()
@@ -208,10 +208,73 @@ admin.put('/subscriptions/:id/cancel', async (c) => {
   return c.json({ success: true })
 })
 
-// ---------------------- WhatsApp lookup helper ----------------------
+// ---------------------- Platform-wide Meta connection settings ----------------------
+// The admin links WABA ID + Access Token ONCE for the whole platform (stored in the
+// `settings` table server-side, not per-browser). After that, adding a customer's
+// number only needs the phone number itself — the backend looks it up under this
+// single saved WABA and resolves phone_number_id automatically.
+const META_WABA_KEY = 'meta_waba_id'
+const META_TOKEN_KEY = 'meta_access_token'
+
+admin.get('/meta-settings', async (c) => {
+  const { DB } = c.env
+  const rows = await DB.prepare(
+    `SELECT key, value FROM settings WHERE key IN (?, ?)`
+  ).bind(META_WABA_KEY, META_TOKEN_KEY).all<{ key: string; value: string }>()
+  const map: Record<string, string> = {}
+  for (const r of rows.results || []) map[r.key] = r.value
+  return c.json({
+    waba_id: map[META_WABA_KEY] || '',
+    has_token: !!map[META_TOKEN_KEY] // never send the token itself back to the browser
+  })
+})
+
+admin.put('/meta-settings', async (c) => {
+  const { DB } = c.env
+  const body = await c.req.json()
+  const waba_id: string | undefined = body.waba_id
+  // access_token is optional on update: if left blank, keep the previously saved
+  // token (frontend shows "leave blank to keep the saved token" for this reason).
+  let access_token: string | undefined = body.access_token
+  if (!waba_id) {
+    return c.json({ error: 'WABA ID مطلوب' }, 400)
+  }
+  if (!access_token) {
+    const existing = await getMetaSettings(DB)
+    if (!existing) {
+      return c.json({ error: 'الـ Access Token مطلوب عند أول ربط للحساب' }, 400)
+    }
+    access_token = existing.access_token
+  }
+  // Validate against Meta before saving, so a typo doesn't silently break every future number
+  try {
+    await fetchPhoneNumbersForWaba(waba_id, access_token)
+  } catch (err: any) {
+    return c.json({ error: `تعذر التحقق من البيانات مع Meta: ${err?.message || err}` }, 400)
+  }
+  await DB.batch([
+    DB.prepare(`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')`).bind(META_WABA_KEY, waba_id),
+    DB.prepare(`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')`).bind(META_TOKEN_KEY, access_token)
+  ])
+  return c.json({ success: true })
+})
+
+async function getMetaSettings(DB: D1Database): Promise<{ waba_id: string; access_token: string } | null> {
+  const rows = await DB.prepare(
+    `SELECT key, value FROM settings WHERE key IN (?, ?)`
+  ).bind(META_WABA_KEY, META_TOKEN_KEY).all<{ key: string; value: string }>()
+  const map: Record<string, string> = {}
+  for (const r of rows.results || []) map[r.key] = r.value
+  if (!map[META_WABA_KEY] || !map[META_TOKEN_KEY]) return null
+  return { waba_id: map[META_WABA_KEY], access_token: map[META_TOKEN_KEY] }
+}
+
+// ---------------------- WhatsApp lookup helper (advanced/manual use) ----------------------
 // Given only a WABA ID + access token, ask Meta for the phone number(s)
-// registered under that WABA, so the admin never has to manually find/copy
-// the phone_number_id from the Meta dashboard.
+// registered under that WABA. Kept for advanced cases (e.g. a customer on a
+// different Meta account); normal flow now uses the platform-wide settings above.
 admin.post('/whatsapp-lookup', async (c) => {
   const { waba_id, access_token, api_version } = await c.req.json()
   if (!waba_id || !access_token) {
@@ -238,10 +301,19 @@ admin.get('/whatsapp-numbers', async (c) => {
   return c.json({ numbers: result.results })
 })
 
+// Main flow: admin gives ONLY the customer's phone number (+ which customer, + a
+// display name). The platform's saved WABA ID/Access Token (set once via
+// /meta-settings) is used to look the number up on Meta and resolve its
+// phone_number_id automatically — no ID of any kind is ever typed by the admin.
 admin.post('/whatsapp-numbers', async (c) => {
   const { DB } = c.env
-  const { customer_id, display_name, phone_number, phone_number_id, waba_id, access_token, extraction_fields } = await c.req.json()
+  const { customer_id, display_name, phone_number, extraction_fields } = await c.req.json()
   if (!customer_id || !display_name || !phone_number) return c.json({ error: 'بيانات ناقصة' }, 400)
+
+  const meta = await getMetaSettings(DB)
+  if (!meta) {
+    return c.json({ error: 'لم يتم ربط حساب واتساب الأعمال (Meta) بعد. اذهب إلى "إعدادات واتساب" وأدخل WABA ID والـ Access Token مرة واحدة أولاً.' }, 400)
+  }
 
   // Enforce max_numbers limit from active subscription
   const activeSub = await DB.prepare(
@@ -254,20 +326,64 @@ admin.post('/whatsapp-numbers', async (c) => {
     return c.json({ error: `العميل وصل للحد الأقصى لعدد الأرقام المسموح (${activeSub.max_numbers}) حسب باقته الحالية` }, 400)
   }
 
+  // Resolve phone_number_id automatically from Meta using only the phone number
+  let matched
+  try {
+    const numbers = await fetchPhoneNumbersForWaba(meta.waba_id, meta.access_token)
+    matched = findMatchingWabaNumber(numbers, phone_number)
+  } catch (err: any) {
+    return c.json({ error: `فشل الاتصال بـ Meta: ${err?.message || err}` }, 400)
+  }
+  if (!matched) {
+    return c.json({ error: 'لم يتم العثور على هذا الرقم تحت حساب واتساب الأعمال المربوط بالمنصة. تأكد أن الرقم أُضيف فعلياً في Meta Business Manager.' }, 404)
+  }
+
   const result = await DB.prepare(
     `INSERT INTO whatsapp_numbers (customer_id, display_name, phone_number, phone_number_id, waba_id, access_token, extraction_fields, status)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'connected')`
   ).bind(
     customer_id,
     display_name,
-    phone_number,
-    phone_number_id || null,
-    waba_id || null,
-    access_token || null,
+    matched.display_phone_number,
+    matched.id,
+    meta.waba_id,
+    meta.access_token,
     normalizeExtractionFields(extraction_fields)
   ).run()
 
-  return c.json({ success: true, id: result.meta.last_row_id })
+  return c.json({ success: true, id: result.meta.last_row_id, phone_number_id: matched.id })
+})
+
+// One-click fix for an existing number that's missing phone_number_id (e.g. it
+// was created before this account-wide auto-linking existed). Uses the number's
+// own stored phone_number + the platform-wide Meta settings — no ID typing needed.
+admin.post('/whatsapp-numbers/:id/auto-fix', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const existing = await DB.prepare('SELECT * FROM whatsapp_numbers WHERE id = ?').bind(id).first<any>()
+  if (!existing) return c.json({ error: 'الرقم غير موجود' }, 404)
+
+  const meta = await getMetaSettings(DB)
+  if (!meta) {
+    return c.json({ error: 'لم يتم ربط حساب واتساب الأعمال (Meta) بعد. اذهب إلى "إعدادات واتساب" وأدخل WABA ID والـ Access Token مرة واحدة أولاً.' }, 400)
+  }
+
+  let matched
+  try {
+    const numbers = await fetchPhoneNumbersForWaba(meta.waba_id, meta.access_token)
+    matched = findMatchingWabaNumber(numbers, existing.phone_number)
+  } catch (err: any) {
+    return c.json({ error: `فشل الاتصال بـ Meta: ${err?.message || err}` }, 400)
+  }
+  if (!matched) {
+    return c.json({ error: `لم يتم العثور على الرقم "${existing.phone_number}" تحت حساب واتساب الأعمال المربوط بالمنصة. تأكد أن الرقم صحيح ومُضاف فعلياً في Meta Business Manager.` }, 404)
+  }
+
+  await DB.prepare(
+    'UPDATE whatsapp_numbers SET phone_number=?, phone_number_id=?, waba_id=?, access_token=?, status=? WHERE id=?'
+  ).bind(matched.display_phone_number, matched.id, meta.waba_id, meta.access_token, 'connected', id).run()
+
+  return c.json({ success: true, phone_number_id: matched.id })
 })
 
 admin.put('/whatsapp-numbers/:id', async (c) => {
