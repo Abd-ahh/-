@@ -10,15 +10,15 @@
     {
       "binding": "DB",
       "database_name": "passport-ai-production",
-      "database_id": "00000000-0000-0000-0000-000000000000"
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "PASSPORTS_BUCKET",
-      "bucket_name": "passport-ai-images"
+      "database_id": "d233b7ec-fa6c-484c-afa0-b183b67df58d"
     }
   ]
+  // R2 bucket not currently used by the code (no binding referenced in src/).
+  // Re-add here once the Cloudflare API token has R2 permissions if file storage is needed:
+  // "r2_buckets": [
+  //   { "binding": "PASSPORTS_BUCKET", "bucket_name": "passport-ai-images" }
+  // ]
+  //
   // Secrets to set with `wrangler pages secret put <NAME>` before production deploy:
   //   GEMINI_API_KEY        -> Google AI Studio Gemini API key
   //   JWT_SECRET            -> random long string for signing session tokens
