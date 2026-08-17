@@ -8,6 +8,26 @@ let customersCache = [];
 let numbersCache = [];
 let fieldsCache = [];
 
+// ---------------- Shared WABA credentials (used once for ALL numbers) ----------------
+// Meta account (WABA ID + Access Token) is usually the same for every WhatsApp number
+// the admin manages, so once entered they're remembered and reused automatically —
+// no need to retype them for every new number.
+function getSavedWaba() {
+  return {
+    waba_id: localStorage.getItem('saved_waba_id') || '',
+    access_token: localStorage.getItem('saved_waba_token') || ''
+  };
+}
+function saveWaba(waba_id, access_token) {
+  if (waba_id) localStorage.setItem('saved_waba_id', waba_id);
+  if (access_token) localStorage.setItem('saved_waba_token', access_token);
+}
+window.clearSavedWaba = function () {
+  localStorage.removeItem('saved_waba_id');
+  localStorage.removeItem('saved_waba_token');
+  render();
+};
+
 // ---------------- Copy to clipboard helper ----------------
 window.copyValue = function (value, btnEl) {
   if (!value) return;
@@ -429,19 +449,28 @@ async function renderNumbers(area) {
 
 window.openNumberModal = async function () {
   const fields = await getFields();
+  const saved = getSavedWaba();
+  const hasSaved = !!(saved.waba_id && saved.access_token);
   const modal = document.getElementById('modal-root');
   modal.innerHTML = `
     <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div class="bg-white rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto">
         <h3 class="font-bold text-lg mb-1">ربط رقم واتساب جديد</h3>
-        <p class="text-xs text-gray-400 mb-4">أدخل WABA ID والـ Access Token فقط — سيتم التفعيل والربط تلقائياً بالكامل بدون الحاجة لنسخ أي Phone Number ID يدوياً</p>
+        <p class="text-xs text-gray-400 mb-4">أدخل WABA ID والـ Access Token — سيتم التفعيل تلقائياً بالكامل. نفس البيانات تُحفظ وتُستخدم تلقائياً لكل رقم جديد بعد ذلك، بدون إعادة إدخالها.</p>
         <div class="space-y-3">
           <select id="wn-customer" class="w-full border border-gray-200 rounded-xl px-4 py-2.5">
             ${customersCache.map(c => `<option value="${c.id}">${c.name} (${c.email})</option>`).join('')}
           </select>
           <input id="wn-name" placeholder="اسم مميز للرقم (مثال: خدمة عملاء الرياض)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
-          <input id="wn-waba" placeholder="WhatsApp Business Account ID (WABA ID)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
-          <input id="wn-token" type="password" placeholder="Access Token (System User Token)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="wn-waba" placeholder="WhatsApp Business Account ID (WABA ID)" value="${saved.waba_id}" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="wn-token" type="password" placeholder="Access Token (System User Token)" value="${saved.access_token}" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          ${hasSaved ? `<div class="flex items-center justify-between bg-emerald-50 text-emerald-700 text-xs rounded-lg px-3 py-2">
+            <span><i class="fa-solid fa-circle-check ml-1"></i> تم استخدام بيانات الحساب المحفوظة تلقائياً</span>
+            <button type="button" onclick="clearSavedWaba(); openNumberModal();" class="underline font-bold">حساب مختلف؟</button>
+          </div>` : ''}
+          <button type="button" onclick="browseWabaNumbers('wn')" id="wn-browse-btn" class="w-full bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold py-2.5 rounded-xl text-sm">
+            <i class="fa-solid fa-list ml-1"></i> عرض كل الأرقام المتاحة تحت هذا الحساب
+          </button>
           <div id="wn-lookup-result"></div>
           <input id="wn-phone" type="hidden" />
           <input id="wn-pnid" type="hidden" />
@@ -465,6 +494,49 @@ window.openNumberModal = async function () {
       </div>
     </div>
   `;
+};
+
+// Shows ALL phone numbers under the given WABA (even if there's only one), so
+// the admin can add several numbers from the same Meta account one after another
+// by just clicking each in the list — no retyping credentials, no guessing.
+window.browseWabaNumbers = async function (prefix) {
+  const waba_id = document.getElementById(`${prefix}-waba`).value.trim();
+  const access_token = document.getElementById(`${prefix}-token`).value.trim();
+  const resultEl = document.getElementById(`${prefix}-lookup-result`);
+  const errEl = document.getElementById(`${prefix}-error`);
+  const btn = document.getElementById(`${prefix}-browse-btn`);
+  if (errEl) errEl.classList.add('hidden');
+  resultEl.innerHTML = '';
+  if (!waba_id || !access_token) {
+    resultEl.innerHTML = `<div class="text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-1">أدخل WABA ID والـ Access Token أولاً</div>`;
+    return;
+  }
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin ml-1"></i> جارِ التحميل...';
+  try {
+    const { data } = await axios.post(`${API}/whatsapp-lookup`, { waba_id, access_token });
+    const numbers = data.numbers || [];
+    if (!numbers.length) {
+      resultEl.innerHTML = `<div class="text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-1">لم يتم العثور على أي رقم تحت هذا الحساب</div>`;
+      return;
+    }
+    const usedIds = numbersCache.map(n => n.phone_number_id).filter(Boolean);
+    resultEl.innerHTML = `
+      <div class="bg-blue-50 rounded-lg p-2 mt-1 text-xs">
+        <p class="mb-2">أرقام هذا الحساب (${numbers.length}) — اضغط على الرقم لتفعيله:</p>
+        ${numbers.map(n => `
+          <button type="button" ${prefix === 'wn' ? `onclick='finishSubmitNumber(${JSON.stringify(n)})'` : `onclick='finishSaveConnectionDetails(${window.__cnNumberId}, ${JSON.stringify(n)})'`}
+            class="block w-full text-right bg-white border border-gray-200 rounded-lg px-3 py-2 mb-1 hover:bg-gray-50">
+            ${n.display_phone_number} — ${n.verified_name}
+            ${usedIds.includes(n.id) ? '<span class="text-gray-400"> (مربوط بالفعل)</span>' : ''}
+          </button>`).join('')}
+      </div>`;
+  } catch (err) {
+    resultEl.innerHTML = `<div class="text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-1">${err?.response?.data?.error || 'فشل الاتصال بـ Meta'}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fa-solid fa-list ml-1"></i> عرض كل الأرقام المتاحة تحت هذا الحساب';
+  }
 };
 
 // Fully-automatic flow: given only WABA ID + Access Token, look up the phone number
@@ -523,17 +595,20 @@ window.submitNumber = async function () {
 window.finishSubmitNumber = async function (n) {
   const selectedFields = Array.from(document.querySelectorAll('.wn-field-cb:checked')).map(cb => cb.value);
   const el = document.getElementById('wn-error');
+  const waba_id = document.getElementById('wn-waba').value.trim();
+  const access_token = document.getElementById('wn-token').value.trim();
   const payload = {
     customer_id: document.getElementById('wn-customer').value,
     display_name: document.getElementById('wn-name').value || n.verified_name || n.display_phone_number,
     phone_number: n.display_phone_number,
     phone_number_id: n.id,
-    waba_id: document.getElementById('wn-waba').value.trim(),
-    access_token: document.getElementById('wn-token').value.trim(),
+    waba_id,
+    access_token,
     extraction_fields: selectedFields.length ? selectedFields : null
   };
   try {
     await axios.post(`${API}/whatsapp-numbers`, payload);
+    saveWaba(waba_id, access_token); // remember for next time — same account, no retyping
     closeModal();
     render();
   } catch (err) {
@@ -545,15 +620,24 @@ window.finishSubmitNumber = async function (n) {
 // ---------------- Connection details modal (fix an existing number missing phone_number_id) ----------------
 window.openConnectionModal = function (numberId) {
   const n = numbersCache.find(x => x.id === numberId);
+  const saved = getSavedWaba();
+  // Prefer the number's own saved credentials if it has them, otherwise fall back
+  // to the shared account credentials already used for other numbers.
+  const wabaVal = (n && n.waba_id) || saved.waba_id;
+  const tokenVal = saved.access_token; // token itself is never pre-filled from n (write-only field), but we can reuse the shared one
+  window.__cnNumberId = numberId;
   const modal = document.getElementById('modal-root');
   modal.innerHTML = `
     <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div class="bg-white rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto">
         <h3 class="font-bold text-lg mb-1">بيانات الاتصال — ${n ? n.display_name : ''}</h3>
-        <p class="text-xs text-gray-400 mb-4">أدخل WABA ID والـ Access Token واضغط حفظ — سيتم جلب رقم الهاتف تلقائياً من Meta وتفعيل الرقم في نفس الخطوة</p>
+        <p class="text-xs text-gray-400 mb-4">أدخل WABA ID والـ Access Token واضغط حفظ — سيتم جلب رقم الهاتف تلقائياً من Meta وتفعيل الرقم في نفس الخطوة. نفس بيانات الحساب المستخدمة لبقية أرقامك تُملأ هنا تلقائياً.</p>
         <div class="space-y-3">
-          <input id="cn-waba" placeholder="WhatsApp Business Account ID (WABA ID)" value="${n && n.waba_id ? n.waba_id : ''}" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
-          <input id="cn-token" type="password" placeholder="Access Token (System User Token)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="cn-waba" placeholder="WhatsApp Business Account ID (WABA ID)" value="${wabaVal}" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="cn-token" type="password" placeholder="Access Token (System User Token)" value="${tokenVal}" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <button type="button" onclick="browseWabaNumbers('cn')" id="cn-browse-btn" class="w-full bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold py-2.5 rounded-xl text-sm">
+            <i class="fa-solid fa-list ml-1"></i> عرض كل الأرقام المتاحة تحت هذا الحساب
+          </button>
           <div id="cn-lookup-result"></div>
           ${n && n.phone_number_id ? `<p class="text-xs text-gray-400">Phone Number ID الحالي: <span class="font-mono">${n.phone_number_id}</span></p>` : ''}
         </div>
@@ -624,6 +708,7 @@ window.finishSaveConnectionDetails = async function (numberId, n, wabaIdArg, tok
   if (access_token) payload.access_token = access_token;
   try {
     await axios.put(`${API}/whatsapp-numbers/${numberId}`, payload);
+    saveWaba(waba_id, access_token); // remember for next time — same account, no retyping
     closeModal();
     render();
   } catch (err) {
