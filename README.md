@@ -72,7 +72,7 @@
 ## 🗄️ البنية التقنية للبيانات
 - **قاعدة البيانات**: Cloudflare D1 (SQLite على الحافة)
 - **الجداول**: `admins`, `customers`, `packages`, `subscriptions`, `whatsapp_numbers`, `operations`, `settings`
-- **تخزين الصور**: Cloudflare R2 (bucket: `passport-ai-images`) — نسخة أرشيفية من كل صورة جواز تمت معالجتها
+- **تخزين الصور**: (غير مفعّل حالياً في الإنتاج — الكود الحالي لا يستخدم R2 فعلياً؛ يمكن إضافته لاحقاً لأرشفة الصور إذا لزم الأمر)
 - **الذكاء الاصطناعي**: Google Gemini (`gemini-2.5-flash`) عبر REST API مباشرة (`generativelanguage.googleapis.com`)
 - **واتساب**: WhatsApp Business Cloud API الرسمي من Meta (Graph API) — **وليس** حل QR غير رسمي، لأن المنصة مبنية بالكامل serverless على Cloudflare Workers (لا عمليات دائمة، لا اتصال Socket مستمر ممكن)
 
@@ -139,13 +139,17 @@ curl http://localhost:3000
 **كمستخدم نهائي**: أرسل صورة واضحة لصفحة بيانات الجواز على رقم واتساب العميل المتصل بالمنصة، واستلم النتيجة خلال ثوانٍ.
 
 ## 🌐 الروابط
+- **الإنتاج (مباشر الآن)**: https://passport-ai-whatsapp.pages.dev
+- **لوحة الإدارة**: https://passport-ai-whatsapp.pages.dev/admin
+- **لوحة العميل**: https://passport-ai-whatsapp.pages.dev/portal
+- **Webhook واتساب**: https://passport-ai-whatsapp.pages.dev/webhook/whatsapp
 - **المعاينة المحلية (Sandbox)**: يتم توفيرها عبر GetServiceUrl أثناء التطوير
-- **الإنتاج**: يُحدَّث بعد النشر الفعلي على Cloudflare Pages
 
 ## 🏗️ الحالة التقنية
 - **المنصة**: Cloudflare Pages + Workers (Hono framework)
-- **قاعدة البيانات**: Cloudflare D1 (SQLite)
-- **التخزين**: Cloudflare R2
-- **الذكاء الاصطناعي**: Google Gemini 2.5 Flash
-- **الحالة**: ✅ MVP يعمل محلياً بالكامل (Auth + Admin + Customer + Webhook logic) — بانتظار مفاتيح Gemini و Meta الحقيقية للنشر الفعلي والاختبار الحي
-- **آخر تحديث**: 2026-08-16
+- **قاعدة البيانات**: Cloudflare D1 (SQLite) — `passport-ai-production`، تم تطبيق كل الـ migrations وزرع الباقات الافتراضية
+- **التخزين**: غير مستخدم حالياً (R2 غير مفعّل، راجع قسم البنية التقنية أعلاه)
+- **الذكاء الاصطناعي**: Google Gemini (`gemini-flash-latest`)
+- **الحالة**: ✅ **منشور فعلياً ويعمل على Cloudflare Pages** — تم إنشاء حساب المدير الأول وتسجيل الدخول تم التحقق منه
+- **الخطوة التالية المطلوبة من المستخدم**: ربط رقم واتساب حقيقي من Meta Business (phone_number_id + waba_id + access_token) من داخل لوحة الإدارة، وضبط رابط الـ Webhook في إعدادات تطبيق Meta
+- **آخر تحديث**: 2026-08-17
