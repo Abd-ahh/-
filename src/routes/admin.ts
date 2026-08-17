@@ -3,6 +3,7 @@ import { requireAdmin } from '../lib/middleware'
 import { hashPassword } from '../lib/auth'
 import { extractPassportData } from '../lib/gemini'
 import { AVAILABLE_FIELDS, normalizeExtractionFields } from '../lib/fields'
+import { fetchPhoneNumbersForWaba } from '../lib/whatsapp'
 import type { AppEnv } from '../lib/types'
 
 const admin = new Hono<AppEnv>()
@@ -205,6 +206,26 @@ admin.put('/subscriptions/:id/cancel', async (c) => {
   const { DB } = c.env
   await DB.prepare("UPDATE subscriptions SET status='cancelled' WHERE id=?").bind(c.req.param('id')).run()
   return c.json({ success: true })
+})
+
+// ---------------------- WhatsApp lookup helper ----------------------
+// Given only a WABA ID + access token, ask Meta for the phone number(s)
+// registered under that WABA, so the admin never has to manually find/copy
+// the phone_number_id from the Meta dashboard.
+admin.post('/whatsapp-lookup', async (c) => {
+  const { waba_id, access_token, api_version } = await c.req.json()
+  if (!waba_id || !access_token) {
+    return c.json({ error: 'WABA ID والـ Access Token مطلوبان' }, 400)
+  }
+  try {
+    const numbers = await fetchPhoneNumbersForWaba(waba_id, access_token, api_version)
+    if (!numbers.length) {
+      return c.json({ error: 'لم يتم العثور على أي رقم مسجل تحت WABA ID هذا. تأكد من صحة القيمة وأن الـ Access Token له صلاحية whatsapp_business_management.' }, 404)
+    }
+    return c.json({ numbers })
+  } catch (err: any) {
+    return c.json({ error: `فشل الاتصال بـ Meta: ${err?.message || err}` }, 400)
+  }
 })
 
 // ---------------------- WhatsApp Numbers ----------------------

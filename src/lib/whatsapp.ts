@@ -54,6 +54,33 @@ export async function markMessageRead(
   }).catch(() => {})
 }
 
+export interface WabaPhoneNumber {
+  id: string // this is the phone_number_id we need to store
+  display_phone_number: string
+  verified_name: string
+  quality_rating?: string
+}
+
+// Given a WhatsApp Business Account ID + access token, fetch the phone numbers
+// registered under it (so the admin doesn't have to manually look up/copy the
+// phone_number_id from Meta's dashboard — WABA ID + token is enough).
+export async function fetchPhoneNumbersForWaba(
+  wabaId: string,
+  accessToken: string,
+  apiVersion?: string
+): Promise<WabaPhoneNumber[]> {
+  const url = `${graphBase(apiVersion)}/${wabaId}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating`
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  })
+  const json: any = await resp.json().catch(() => ({}))
+  if (!resp.ok) {
+    const msg = json?.error?.message || `HTTP ${resp.status}`
+    throw new Error(msg)
+  }
+  return (json.data || []) as WabaPhoneNumber[]
+}
+
 export interface MediaDownloadResult {
   base64: string
   mimeType: string

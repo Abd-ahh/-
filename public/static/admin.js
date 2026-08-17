@@ -415,6 +415,7 @@ async function renderNumbers(area) {
               <td class="p-4 text-gray-400 text-xs">${n.phone_number_id || '-'}</td>
               <td class="p-4">${statusBadge(n.status)}</td>
               <td class="p-4 flex gap-3">
+                <button onclick="openConnectionModal(${n.id})" class="text-gray-600 hover:underline text-xs font-bold">بيانات الاتصال</button>
                 <button onclick="openFieldsModal(${n.id})" class="text-brand-600 hover:underline text-xs font-bold">حقول الاستخراج</button>
                 <button onclick="deleteNumber(${n.id})" class="text-red-500 hover:underline text-xs font-bold">حذف</button>
               </td>
@@ -439,10 +440,14 @@ window.openNumberModal = async function () {
             ${customersCache.map(c => `<option value="${c.id}">${c.name} (${c.email})</option>`).join('')}
           </select>
           <input id="wn-name" placeholder="اسم مميز للرقم (مثال: خدمة عملاء الرياض)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
-          <input id="wn-phone" placeholder="رقم الجوال بصيغة دولية +9665xxxxxxxx" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
-          <input id="wn-pnid" placeholder="Phone Number ID (من Meta)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
-          <input id="wn-waba" placeholder="WhatsApp Business Account ID (اختياري)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="wn-waba" placeholder="WhatsApp Business Account ID (WABA ID)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
           <input id="wn-token" type="password" placeholder="Access Token (System User Token)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <button type="button" onclick="lookupWabaNumber()" id="wn-lookup-btn" class="w-full bg-gray-800 hover:bg-gray-900 text-white font-bold py-2.5 rounded-xl text-sm">
+            <i class="fa-solid fa-magnifying-glass ml-1"></i> جلب الرقم تلقائياً من Meta
+          </button>
+          <div id="wn-lookup-result"></div>
+          <input id="wn-phone" placeholder="رقم الجوال (سيُملأ تلقائياً بعد الجلب، أو أدخله يدوياً)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="wn-pnid" placeholder="Phone Number ID (يُملأ تلقائياً بعد الجلب)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5 bg-gray-50" readonly />
         </div>
         <div class="mt-4">
           <p class="text-sm font-bold text-gray-700 mb-2">الحقول التي يستخرجها البوت لهذا الرقم</p>
@@ -465,6 +470,51 @@ window.openNumberModal = async function () {
   `;
 };
 
+window.lookupWabaNumber = async function () {
+  const waba_id = document.getElementById('wn-waba').value.trim();
+  const access_token = document.getElementById('wn-token').value.trim();
+  const resultEl = document.getElementById('wn-lookup-result');
+  const btn = document.getElementById('wn-lookup-btn');
+  resultEl.innerHTML = '';
+  if (!waba_id || !access_token) {
+    resultEl.innerHTML = `<div class="text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-1">أدخل WABA ID والـ Access Token أولاً</div>`;
+    return;
+  }
+  btn.disabled = true;
+  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin ml-1"></i> جارِ الجلب...`;
+  try {
+    const { data } = await axios.post(`${API}/whatsapp-lookup`, { waba_id, access_token });
+    const numbers = data.numbers || [];
+    if (numbers.length === 1) {
+      applyLookedUpNumber(numbers[0]);
+      resultEl.innerHTML = `<div class="text-green-700 text-xs bg-green-50 rounded-lg p-2 mt-1"><i class="fa-solid fa-circle-check ml-1"></i> تم العثور على الرقم: ${numbers[0].display_phone_number} (${numbers[0].verified_name})</div>`;
+    } else {
+      // Multiple numbers under this WABA — let the admin pick which one
+      resultEl.innerHTML = `
+        <div class="bg-blue-50 rounded-lg p-2 mt-1 text-xs">
+          <p class="mb-2">تم العثور على ${numbers.length} أرقام، اختر الرقم المطلوب:</p>
+          ${numbers.map((n, i) => `
+            <button type="button" onclick='applyLookedUpNumber(${JSON.stringify(n)})' class="block w-full text-right bg-white border border-gray-200 rounded-lg px-3 py-2 mb-1 hover:bg-gray-50">
+              ${n.display_phone_number} — ${n.verified_name}
+            </button>`).join('')}
+        </div>`;
+    }
+  } catch (err) {
+    resultEl.innerHTML = `<div class="text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-1">${err?.response?.data?.error || 'فشل الاتصال بـ Meta'}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `<i class="fa-solid fa-magnifying-glass ml-1"></i> جلب الرقم تلقائياً من Meta`;
+  }
+};
+
+window.applyLookedUpNumber = function (n) {
+  document.getElementById('wn-pnid').value = n.id;
+  document.getElementById('wn-phone').value = n.display_phone_number;
+  if (!document.getElementById('wn-name').value) {
+    document.getElementById('wn-name').value = n.verified_name || n.display_phone_number;
+  }
+};
+
 window.submitNumber = async function () {
   const selectedFields = Array.from(document.querySelectorAll('.wn-field-cb:checked')).map(cb => cb.value);
   const payload = {
@@ -476,14 +526,110 @@ window.submitNumber = async function () {
     access_token: document.getElementById('wn-token').value,
     extraction_fields: selectedFields.length ? selectedFields : null
   };
+  const el = document.getElementById('wn-error');
+  if (!payload.phone_number_id) {
+    el.textContent = 'الرجاء الضغط على "جلب الرقم تلقائياً من Meta" أولاً — الرقم لن يستقبل أي رسائل بدون Phone Number ID';
+    el.classList.remove('hidden');
+    return;
+  }
   try {
     await axios.post(`${API}/whatsapp-numbers`, payload);
     closeModal();
     render();
   } catch (err) {
-    const el = document.getElementById('wn-error');
     el.textContent = err?.response?.data?.error || 'حدث خطأ';
     el.classList.remove('hidden');
+  }
+};
+
+// ---------------- Connection details modal (fix an existing number missing phone_number_id) ----------------
+window.openConnectionModal = function (numberId) {
+  const n = numbersCache.find(x => x.id === numberId);
+  const modal = document.getElementById('modal-root');
+  modal.innerHTML = `
+    <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <h3 class="font-bold text-lg mb-1">بيانات الاتصال — ${n ? n.display_name : ''}</h3>
+        <p class="text-xs text-gray-400 mb-4">أدخل WABA ID والـ Access Token واضغط "جلب الرقم تلقائياً" لملء Phone Number ID بدون الحاجة لنسخه يدوياً من Meta</p>
+        <div class="space-y-3">
+          <input id="cn-waba" placeholder="WhatsApp Business Account ID (WABA ID)" value="${n && n.waba_id ? n.waba_id : ''}" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="cn-token" type="password" placeholder="Access Token (System User Token)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <button type="button" onclick="lookupConnectionNumber(${numberId})" id="cn-lookup-btn" class="w-full bg-gray-800 hover:bg-gray-900 text-white font-bold py-2.5 rounded-xl text-sm">
+            <i class="fa-solid fa-magnifying-glass ml-1"></i> جلب الرقم تلقائياً من Meta
+          </button>
+          <div id="cn-lookup-result"></div>
+          <input id="cn-phone" placeholder="رقم الجوال" value="${n ? n.phone_number : ''}" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="cn-pnid" placeholder="Phone Number ID" value="${n && n.phone_number_id ? n.phone_number_id : ''}" class="w-full border border-gray-200 rounded-xl px-4 py-2.5 bg-gray-50" readonly />
+        </div>
+        <div id="cn-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-3"></div>
+        <div class="flex gap-3 mt-5">
+          <button onclick="saveConnectionDetails(${numberId})" class="flex-1 bg-brand-600 text-white font-bold py-2.5 rounded-xl">حفظ</button>
+          <button onclick="closeModal()" class="flex-1 bg-gray-100 text-gray-700 font-bold py-2.5 rounded-xl">إلغاء</button>
+        </div>
+      </div>
+    </div>
+  `;
+};
+
+window.lookupConnectionNumber = async function (numberId) {
+  const waba_id = document.getElementById('cn-waba').value.trim();
+  const access_token = document.getElementById('cn-token').value.trim();
+  const resultEl = document.getElementById('cn-lookup-result');
+  const btn = document.getElementById('cn-lookup-btn');
+  resultEl.innerHTML = '';
+  if (!waba_id || !access_token) {
+    resultEl.innerHTML = `<div class="text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-1">أدخل WABA ID والـ Access Token أولاً</div>`;
+    return;
+  }
+  btn.disabled = true;
+  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin ml-1"></i> جارِ الجلب...`;
+  try {
+    const { data } = await axios.post(`${API}/whatsapp-lookup`, { waba_id, access_token });
+    const numbers = data.numbers || [];
+    if (numbers.length === 1) {
+      document.getElementById('cn-pnid').value = numbers[0].id;
+      document.getElementById('cn-phone').value = numbers[0].display_phone_number;
+      resultEl.innerHTML = `<div class="text-green-700 text-xs bg-green-50 rounded-lg p-2 mt-1"><i class="fa-solid fa-circle-check ml-1"></i> تم العثور على الرقم: ${numbers[0].display_phone_number} (${numbers[0].verified_name})</div>`;
+    } else {
+      resultEl.innerHTML = `
+        <div class="bg-blue-50 rounded-lg p-2 mt-1 text-xs">
+          <p class="mb-2">تم العثور على ${numbers.length} أرقام، اختر الرقم المطلوب:</p>
+          ${numbers.map(nn => `
+            <button type="button" onclick='document.getElementById("cn-pnid").value=${JSON.stringify(nn.id)};document.getElementById("cn-phone").value=${JSON.stringify(nn.display_phone_number)};' class="block w-full text-right bg-white border border-gray-200 rounded-lg px-3 py-2 mb-1 hover:bg-gray-50">
+              ${nn.display_phone_number} — ${nn.verified_name}
+            </button>`).join('')}
+        </div>`;
+    }
+  } catch (err) {
+    resultEl.innerHTML = `<div class="text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-1">${err?.response?.data?.error || 'فشل الاتصال بـ Meta'}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `<i class="fa-solid fa-magnifying-glass ml-1"></i> جلب الرقم تلقائياً من Meta`;
+  }
+};
+
+window.saveConnectionDetails = async function (numberId) {
+  const waba_id = document.getElementById('cn-waba').value.trim();
+  const access_token = document.getElementById('cn-token').value.trim();
+  const phone_number = document.getElementById('cn-phone').value.trim();
+  const phone_number_id = document.getElementById('cn-pnid').value.trim();
+  const errEl = document.getElementById('cn-error');
+  if (!phone_number_id) {
+    errEl.textContent = 'الرجاء الضغط على "جلب الرقم تلقائياً من Meta" أولاً';
+    errEl.classList.remove('hidden');
+    return;
+  }
+  const payload = { waba_id, phone_number_id };
+  if (access_token) payload.access_token = access_token;
+  try {
+    await axios.put(`${API}/whatsapp-numbers/${numberId}`, payload);
+    // phone_number itself isn't part of the partial-update endpoint's fields list;
+    // no separate route needed since display concerns only, safe to skip if unchanged
+    closeModal();
+    render();
+  } catch (err) {
+    errEl.textContent = err?.response?.data?.error || 'حدث خطأ';
+    errEl.classList.remove('hidden');
   }
 };
 
