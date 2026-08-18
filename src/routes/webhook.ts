@@ -4,7 +4,7 @@ import type { WhatsAppWebhookBody } from '../lib/whatsapp'
 import { downloadMedia, sendTextMessage, markMessageRead } from '../lib/whatsapp'
 import { extractPassportData } from '../lib/gemini'
 import { AVAILABLE_FIELDS, parseExtractionFields } from '../lib/fields'
-import { extractOfficeActivationCode, matchOfficeByName } from '../lib/office'
+import { extractOfficeActivationCode, matchOfficeByName, matchByCustomCommand } from '../lib/office'
 
 const SHARED_SESSION_DAYS = 30
 
@@ -102,32 +102,71 @@ async function handleIncomingMessage(params: {
 
   // ---------------- Shared/multi-tenant number resolution ----------------
   // This number has no single owner (is_shared = 1). The sender must first
-  // send "<اسم المكتب> تفعيل" once to bind their number to an office; after
-  // that a session row resolves them automatically for 30 days (renewed on
-  // every successful interaction).
+  // link their number to an office, either by sending "<اسم المكتب> تفعيل"
+  // (auto-derived pattern) or the office's own custom activation command
+  // (if the office set one — this fully replaces the name-based pattern for
+  // that office). After that a session row resolves them automatically for
+  // 30 days (renewed on every successful interaction). The office may also
+  // set a custom deactivation command to let the sender unlink on demand.
   if (numberRow.is_shared) {
     const messageText: string = msg.type === 'text' ? (msg.text?.body || '') : ''
-    const officeNameRaw = extractOfficeActivationCode(messageText)
 
-    if (officeNameRaw) {
-      // Activation attempt: match against customers on a 'shared' package
-      const candidates = await DB.prepare(
-        `SELECT DISTINCT cu.id, cu.name FROM customers cu
-         JOIN subscriptions s ON s.customer_id = cu.id
-         JOIN packages p ON p.id = s.package_id
-         WHERE p.number_mode = 'shared' AND s.status = 'active' AND s.end_date >= datetime('now')`
-      ).all<{ id: number; name: string }>()
+    // ---- 1) Deactivation command: only relevant if a session already exists ----
+    const existingSession = await DB.prepare(
+      `SELECT * FROM shared_number_sessions WHERE whatsapp_number_id = ? AND sender_phone = ? AND expires_at >= datetime('now')`
+    ).bind(numberRow.id, senderPhone).first<any>()
 
-      const matched = matchOfficeByName(candidates.results || [], officeNameRaw)
-      if (!matched) {
-        await sendTextMessage(
-          phoneNumberId, accessToken, senderPhone,
-          `⚠️ لم يتم العثور على مكتب باسم "${officeNameRaw}". تأكد من كتابة اسم المكتب بشكل صحيح متبوعاً بكلمة "تفعيل"، مثال: معالم الرياض 11 تفعيل`,
-          WHATSAPP_API_VERSION
-        ).catch(() => {})
-        return
+    if (existingSession && messageText) {
+      const linkedCustomer = await DB.prepare('SELECT deactivation_code FROM customers WHERE id = ?')
+        .bind(existingSession.customer_id).first<{ deactivation_code: string | null }>()
+
+      if (linkedCustomer?.deactivation_code) {
+        const isDeactivation = matchByCustomCommand(
+          [{ id: existingSession.id, code: linkedCustomer.deactivation_code }],
+          messageText
+        )
+        if (isDeactivation) {
+          await DB.prepare('DELETE FROM shared_number_sessions WHERE id = ?').bind(existingSession.id).run()
+          await sendTextMessage(
+            phoneNumberId, accessToken, senderPhone,
+            '✅ تم إلغاء ربط رقمك بالمكتب. أرسل اسم مكتبك متبوعاً بكلمة "تفعيل" أو أمر التفعيل الخاص بالمكتب للربط من جديد.',
+            WHATSAPP_API_VERSION
+          ).catch(() => {})
+          return
+        }
       }
+    }
 
+    // ---- 2) Activation attempt (custom command first, then name pattern) ----
+    const candidates = await DB.prepare(
+      `SELECT DISTINCT cu.id, cu.name, cu.activation_code FROM customers cu
+       JOIN subscriptions s ON s.customer_id = cu.id
+       JOIN packages p ON p.id = s.package_id
+       WHERE p.number_mode = 'shared' AND s.status = 'active' AND s.end_date >= datetime('now')`
+    ).all<{ id: number; name: string; activation_code: string | null }>()
+    const allCandidates = candidates.results || []
+
+    let matched: { id: number; name: string } | null = null
+
+    if (messageText) {
+      const customMatch = matchByCustomCommand(
+        allCandidates
+          .filter((c) => !!c.activation_code)
+          .map((c) => ({ id: c.id, name: c.name, code: c.activation_code })),
+        messageText
+      )
+      if (customMatch) matched = { id: customMatch.id, name: customMatch.name }
+    }
+
+    const officeNameRaw = !matched ? extractOfficeActivationCode(messageText) : null
+    if (!matched && officeNameRaw) {
+      // Name-based pattern only applies to offices that have NOT set a
+      // custom activation command (a custom command fully replaces it).
+      const nameCandidates = allCandidates.filter((c) => !c.activation_code)
+      matched = matchOfficeByName(nameCandidates, officeNameRaw)
+    }
+
+    if (matched) {
       const expiresAt = new Date(Date.now() + SHARED_SESSION_DAYS * 24 * 60 * 60 * 1000).toISOString()
       await DB.prepare(
         `INSERT INTO shared_number_sessions (whatsapp_number_id, sender_phone, customer_id, expires_at, updated_at)
@@ -143,25 +182,31 @@ async function handleIncomingMessage(params: {
       return
     }
 
-    // Not an activation message: look up an existing (non-expired) session
-    const session = await DB.prepare(
-      `SELECT * FROM shared_number_sessions WHERE whatsapp_number_id = ? AND sender_phone = ? AND expires_at >= datetime('now')`
-    ).bind(numberRow.id, senderPhone).first<any>()
-
-    if (!session) {
+    if (officeNameRaw) {
+      // A name-pattern activation attempt was made but nothing matched.
       await sendTextMessage(
         phoneNumberId, accessToken, senderPhone,
-        '👋 مرحباً! أرسل اسم مكتبك متبوعاً بكلمة "تفعيل" لربط رقمك، مثال: معالم الرياض 11 تفعيل',
+        `⚠️ لم يتم العثور على مكتب باسم "${officeNameRaw}". تأكد من كتابة اسم المكتب بشكل صحيح متبوعاً بكلمة "تفعيل"، مثال: معالم الرياض 11 تفعيل`,
         WHATSAPP_API_VERSION
       ).catch(() => {})
       return
     }
 
-    customerId = session.customer_id as number
+    // ---- 3) Not an activation/deactivation message: use existing session ----
+    if (!existingSession) {
+      await sendTextMessage(
+        phoneNumberId, accessToken, senderPhone,
+        '👋 مرحباً! أرسل اسم مكتبك متبوعاً بكلمة "تفعيل" أو أمر التفعيل الخاص بالمكتب لربط رقمك، مثال: معالم الرياض 11 تفعيل',
+        WHATSAPP_API_VERSION
+      ).catch(() => {})
+      return
+    }
+
+    customerId = existingSession.customer_id as number
     // Renew the session on every successful interaction
     const newExpiresAt = new Date(Date.now() + SHARED_SESSION_DAYS * 24 * 60 * 60 * 1000).toISOString()
     DB.prepare(`UPDATE shared_number_sessions SET expires_at=?, updated_at=datetime('now') WHERE id=?`)
-      .bind(newExpiresAt, session.id).run().catch(() => {})
+      .bind(newExpiresAt, existingSession.id).run().catch(() => {})
   }
 
   if (!customerId) {

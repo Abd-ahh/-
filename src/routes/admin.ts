@@ -156,26 +156,73 @@ admin.get('/customers/:id', async (c) => {
   return c.json({ customer, numbers: numbers.results, subscriptions: subscriptions.results, operations: operations.results })
 })
 
+// Custom activation/deactivation commands must be unique across all customers
+// (they're matched against the shared number's incoming messages with no
+// other context, so ambiguity would misroute a message to the wrong office).
+async function checkDuplicateCommand(
+  DB: D1Database,
+  field: 'activation_code' | 'deactivation_code',
+  value: string,
+  excludeId?: string | number
+): Promise<boolean> {
+  const query = excludeId
+    ? DB.prepare(`SELECT id FROM customers WHERE ${field} = ? AND id != ?`).bind(value, excludeId)
+    : DB.prepare(`SELECT id FROM customers WHERE ${field} = ?`).bind(value)
+  const existing = await query.first()
+  return !!existing
+}
+
 admin.post('/customers', async (c) => {
   const { DB } = c.env
-  const { name, email, phone, password } = await c.req.json()
+  const { name, email, phone, password, activation_code, deactivation_code } = await c.req.json()
   if (!name || !email || !password) return c.json({ error: 'الرجاء تعبئة جميع الحقول' }, 400)
   const existing = await DB.prepare('SELECT id FROM customers WHERE email = ?').bind(email).first()
   if (existing) return c.json({ error: 'البريد الإلكتروني مستخدم بالفعل' }, 400)
+
+  const actCode = activation_code?.trim() || null
+  const deactCode = deactivation_code?.trim() || null
+  if (actCode && (await checkDuplicateCommand(DB, 'activation_code', actCode))) {
+    return c.json({ error: 'أمر التفعيل مستخدم بالفعل من مكتب آخر، الرجاء اختيار أمر مختلف' }, 400)
+  }
+  if (deactCode && (await checkDuplicateCommand(DB, 'deactivation_code', deactCode))) {
+    return c.json({ error: 'أمر الإيقاف مستخدم بالفعل من مكتب آخر، الرجاء اختيار أمر مختلف' }, 400)
+  }
+
   const { hash, salt } = await hashPassword(password)
   const result = await DB.prepare(
-    'INSERT INTO customers (name, email, phone, password_hash, password_salt) VALUES (?, ?, ?, ?, ?)'
-  ).bind(name, email, phone || null, hash, salt).run()
+    'INSERT INTO customers (name, email, phone, password_hash, password_salt, activation_code, deactivation_code) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).bind(name, email, phone || null, hash, salt, actCode, deactCode).run()
   return c.json({ success: true, id: result.meta.last_row_id })
 })
 
 admin.put('/customers/:id', async (c) => {
   const { DB } = c.env
   const id = c.req.param('id')
-  const { name, phone, status, reply_language, welcome_message } = await c.req.json()
+  const existing = await DB.prepare('SELECT * FROM customers WHERE id = ?').bind(id).first<any>()
+  if (!existing) return c.json({ error: 'العميل غير موجود' }, 404)
+
+  const body = await c.req.json()
+  // Partial update: keep existing values for any field not sent in the body,
+  // so callers (e.g. the "save commands only" UI action) can update just
+  // activation_code/deactivation_code without wiping name/phone/status.
+  const name = body.name !== undefined ? body.name : existing.name
+  const phone = body.phone !== undefined ? (body.phone || null) : existing.phone
+  const status = body.status !== undefined ? body.status : existing.status
+  const reply_language = body.reply_language !== undefined ? (body.reply_language || 'ar') : existing.reply_language
+  const welcome_message = body.welcome_message !== undefined ? (body.welcome_message || null) : existing.welcome_message
+  const actCode = body.activation_code !== undefined ? (body.activation_code?.trim() || null) : existing.activation_code
+  const deactCode = body.deactivation_code !== undefined ? (body.deactivation_code?.trim() || null) : existing.deactivation_code
+
+  if (actCode && (await checkDuplicateCommand(DB, 'activation_code', actCode, id))) {
+    return c.json({ error: 'أمر التفعيل مستخدم بالفعل من مكتب آخر، الرجاء اختيار أمر مختلف' }, 400)
+  }
+  if (deactCode && (await checkDuplicateCommand(DB, 'deactivation_code', deactCode, id))) {
+    return c.json({ error: 'أمر الإيقاف مستخدم بالفعل من مكتب آخر، الرجاء اختيار أمر مختلف' }, 400)
+  }
+
   await DB.prepare(
-    'UPDATE customers SET name=?, phone=?, status=?, reply_language=?, welcome_message=? WHERE id=?'
-  ).bind(name, phone || null, status, reply_language || 'ar', welcome_message || null, id).run()
+    'UPDATE customers SET name=?, phone=?, status=?, reply_language=?, welcome_message=?, activation_code=?, deactivation_code=? WHERE id=?'
+  ).bind(name, phone, status, reply_language, welcome_message, actCode, deactCode, id).run()
   return c.json({ success: true })
 })
 

@@ -211,6 +211,10 @@ window.openCustomerModal = function () {
           <input id="nc-email" type="email" placeholder="البريد الإلكتروني" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
           <input id="nc-phone" placeholder="رقم الجوال (اختياري)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
           <input id="nc-password" type="text" placeholder="كلمة المرور المبدئية" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <hr class="my-1" />
+          <p class="text-xs text-gray-400">أوامر الربط بالرقم المشترك (اختياري - يمكن ضبطها لاحقاً من صفحة العميل)</p>
+          <input id="nc-activation" placeholder="أمر تفعيل مخصص (اختياري)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="nc-deactivation" placeholder="أمر إيقاف/إلغاء الربط (اختياري)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
         </div>
         <div id="nc-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-3"></div>
         <div class="flex gap-3 mt-5">
@@ -229,8 +233,10 @@ window.submitCustomer = async function () {
   const email = document.getElementById('nc-email').value;
   const phone = document.getElementById('nc-phone').value;
   const password = document.getElementById('nc-password').value;
+  const activation_code = document.getElementById('nc-activation').value;
+  const deactivation_code = document.getElementById('nc-deactivation').value;
   try {
-    await axios.post(`${API}/customers`, { name, email, phone, password });
+    await axios.post(`${API}/customers`, { name, email, phone, password, activation_code, deactivation_code });
     closeModal();
     render();
   } catch (err) {
@@ -263,6 +269,17 @@ window.openCustomerDetail = async function (id) {
             </select>
             <input id="pkg-days" type="number" value="30" class="w-20 border border-gray-200 rounded-lg px-2 py-2 text-sm" title="عدد الأيام" />
             <button onclick="assignSubscription(${id})" class="bg-brand-600 text-white text-sm font-bold px-4 py-2 rounded-lg">تفعيل</button>
+          </div>
+        </div>
+
+        <div class="mb-5">
+          <h4 class="font-bold text-sm text-gray-700 mb-2">أوامر الربط بالرقم المشترك (اختياري)</h4>
+          <p class="text-xs text-gray-400 mb-2">إذا تُرك فارغاً يُستخدم النمط الافتراضي: "${data.customer.name} تفعيل"</p>
+          <div class="space-y-2">
+            <input id="cu-activation" value="${data.customer.activation_code || ''}" placeholder="أمر تفعيل مخصص، مثال: معالم الرياض" class="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm" />
+            <input id="cu-deactivation" value="${data.customer.deactivation_code || ''}" placeholder="أمر إيقاف/إلغاء الربط، مثال: الغاء معالم الرياض" class="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm" />
+            <div id="cu-cmd-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2"></div>
+            <button onclick="saveCustomerCommands(${id})" class="w-full bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold py-2 rounded-lg">حفظ الأوامر</button>
           </div>
         </div>
 
@@ -301,6 +318,20 @@ window.openCustomerDetail = async function (id) {
       </div>
     </div>
   `;
+};
+
+window.saveCustomerCommands = async function (customerId) {
+  const activation_code = document.getElementById('cu-activation').value;
+  const deactivation_code = document.getElementById('cu-deactivation').value;
+  try {
+    await axios.put(`${API}/customers/${customerId}`, { activation_code, deactivation_code });
+    closeModal();
+    render();
+  } catch (err) {
+    const el = document.getElementById('cu-cmd-error');
+    el.textContent = err?.response?.data?.error || 'حدث خطأ';
+    el.classList.remove('hidden');
+  }
 };
 
 window.assignSubscription = async function (customerId) {

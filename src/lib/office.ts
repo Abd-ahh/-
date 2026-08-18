@@ -68,3 +68,27 @@ export function matchOfficeByName(candidates: OfficeCandidate[], officeNameRaw: 
   })
   return match || null
 }
+
+// ---------------------- Custom activation/deactivation commands ----------------------
+// Each office may optionally set its own free-text activation/deactivation
+// command (instead of relying on the auto-derived "<name> تفعيل" pattern).
+// Matching is an exact comparison of the WHOLE incoming message (normalized)
+// against the stored command string.
+
+export interface CustomCommandCandidate {
+  id: number
+  code: string | null | undefined
+}
+
+export function matchByCustomCommand<T extends CustomCommandCandidate>(
+  candidates: T[],
+  incomingText: string
+): T | null {
+  const target = normalizeArabicText(incomingText)
+  if (!target) return null
+  const match = candidates.find((c) => {
+    const code = normalizeArabicText(c.code || '')
+    return code.length > 0 && code === target
+  })
+  return match || null
+}

@@ -173,7 +173,9 @@ async function renderNumbers(area) {
         <a href="${link.deep_link}" target="_blank" class="inline-block bg-emerald-500 hover:bg-emerald-600 text-white font-bold px-6 py-3 rounded-xl text-sm">
           <i class="fa-brands fa-whatsapp ml-1"></i> فتح الرابط في واتساب
         </a>
-        <p class="text-xs text-gray-400 mt-5">أو أرسل عملاؤك يدوياً هذه الرسالة إلى الرقم المشترك: <br/><span class="font-bold">${link.office_name} تفعيل</span></p>
+        <p class="text-xs text-gray-400 mt-5">أو أرسل عملاؤك يدوياً هذه الرسالة إلى الرقم المشترك: <br/><span class="font-bold">${link.activation_text}</span></p>
+        ${link.deactivation_text ? `<p class="text-xs text-gray-400 mt-2">لإلغاء الربط يرسل عميلك: <br/><span class="font-bold">${link.deactivation_text}</span></p>` : ''}
+        <p class="text-xs text-brand-600 mt-4"><i class="fa-solid fa-gear ml-1"></i> يمكنك تخصيص أوامر التفعيل والإيقاف من تبويب "الإعدادات"</p>
       </div>
     `;
     return;
@@ -287,6 +289,22 @@ async function renderSettings(area) {
           <textarea id="st-welcome" rows="3" class="w-full border border-gray-200 rounded-xl px-4 py-2.5">${c.welcome_message || ''}</textarea>
         </div>
       </div>
+
+      <hr class="my-6" />
+      <h3 class="font-bold text-lg mb-2">أوامر الرقم المشترك (إن كان مكتبك يستخدمه)</h3>
+      <p class="text-xs text-gray-400 mb-4">اترك الحقل فارغاً لاستخدام النمط الافتراضي: "${c.name} تفعيل". أمر التفعيل المخصص يحل محل هذا النمط بالكامل.</p>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-bold text-gray-700 mb-1.5">أمر تفعيل مخصص</label>
+          <input id="st-activation" value="${c.activation_code || ''}" placeholder="مثال: معالم الرياض" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+        </div>
+        <div>
+          <label class="block text-sm font-bold text-gray-700 mb-1.5">أمر إلغاء الربط (اختياري)</label>
+          <input id="st-deactivation" value="${c.deactivation_code || ''}" placeholder="مثال: الغاء معالم الرياض" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+        </div>
+      </div>
+
+      <div id="st-error" class="hidden text-red-600 text-sm bg-red-50 rounded-lg p-3 mt-4"></div>
       <div id="st-success" class="hidden text-emerald-600 text-sm bg-emerald-50 rounded-lg p-3 mt-4">تم الحفظ بنجاح</div>
       <button onclick="saveSettings()" class="mt-5 bg-brand-600 hover:bg-brand-700 text-white font-bold px-6 py-3 rounded-xl">حفظ الإعدادات</button>
     </div>
@@ -297,12 +315,21 @@ window.saveSettings = async function () {
   const payload = {
     phone: document.getElementById('st-phone').value,
     reply_language: document.getElementById('st-lang').value,
-    welcome_message: document.getElementById('st-welcome').value
+    welcome_message: document.getElementById('st-welcome').value,
+    activation_code: document.getElementById('st-activation').value,
+    deactivation_code: document.getElementById('st-deactivation').value
   };
-  await axios.put(`${API}/settings`, payload);
-  const el = document.getElementById('st-success');
-  el.classList.remove('hidden');
-  setTimeout(() => el.classList.add('hidden'), 2500);
+  const errEl = document.getElementById('st-error');
+  const okEl = document.getElementById('st-success');
+  errEl.classList.add('hidden');
+  try {
+    await axios.put(`${API}/settings`, payload);
+    okEl.classList.remove('hidden');
+    setTimeout(() => okEl.classList.add('hidden'), 2500);
+  } catch (err) {
+    errEl.textContent = err?.response?.data?.error || 'حدث خطأ';
+    errEl.classList.remove('hidden');
+  }
 };
 
 render();

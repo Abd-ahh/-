@@ -36,6 +36,10 @@ export interface CustomerRow {
   status: string
   reply_language: string
   welcome_message: string | null
+  // Custom commands for the shared platform number. When set, they fully
+  // replace the auto-derived "<office name> تفعيل" matching for this office.
+  activation_code: string | null
+  deactivation_code: string | null
   created_at: string
 }
 
