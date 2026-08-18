@@ -98,12 +98,15 @@ admin.get('/packages', async (c) => {
 admin.post('/packages', async (c) => {
   const { DB } = c.env
   const body = await c.req.json()
-  const { name_ar, name_en, max_numbers, monthly_operations, price, currency, sort_order } = body
+  const { name_ar, name_en, max_numbers, monthly_operations, price, currency, sort_order, number_mode } = body
   if (!name_ar || !name_en) return c.json({ error: 'اسم الباقة مطلوب' }, 400)
   const result = await DB.prepare(
-    `INSERT INTO packages (name_ar, name_en, max_numbers, monthly_operations, price, currency, sort_order)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).bind(name_ar, name_en, max_numbers || 1, monthly_operations || 500, price || 0, currency || 'SAR', sort_order || 0).run()
+    `INSERT INTO packages (name_ar, name_en, max_numbers, monthly_operations, price, currency, sort_order, number_mode)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    name_ar, name_en, max_numbers || 1, monthly_operations || 500, price || 0, currency || 'SAR', sort_order || 0,
+    number_mode === 'shared' ? 'shared' : 'private'
+  ).run()
   return c.json({ success: true, id: result.meta.last_row_id })
 })
 
@@ -111,10 +114,13 @@ admin.put('/packages/:id', async (c) => {
   const { DB } = c.env
   const id = c.req.param('id')
   const body = await c.req.json()
-  const { name_ar, name_en, max_numbers, monthly_operations, price, currency, is_active, sort_order } = body
+  const { name_ar, name_en, max_numbers, monthly_operations, price, currency, is_active, sort_order, number_mode } = body
   await DB.prepare(
-    `UPDATE packages SET name_ar=?, name_en=?, max_numbers=?, monthly_operations=?, price=?, currency=?, is_active=?, sort_order=? WHERE id=?`
-  ).bind(name_ar, name_en, max_numbers, monthly_operations, price, currency, is_active ? 1 : 0, sort_order || 0, id).run()
+    `UPDATE packages SET name_ar=?, name_en=?, max_numbers=?, monthly_operations=?, price=?, currency=?, is_active=?, sort_order=?, number_mode=? WHERE id=?`
+  ).bind(
+    name_ar, name_en, max_numbers, monthly_operations, price, currency, is_active ? 1 : 0, sort_order || 0,
+    number_mode === 'shared' ? 'shared' : 'private', id
+  ).run()
   return c.json({ success: true })
 })
 
@@ -292,11 +298,16 @@ admin.post('/whatsapp-lookup', async (c) => {
 })
 
 // ---------------------- WhatsApp Numbers ----------------------
+// Excludes the platform's shared number (is_shared=1) — that one is managed
+// separately via the /shared-number endpoints below since it has no single
+// customer owner.
 admin.get('/whatsapp-numbers', async (c) => {
   const { DB } = c.env
   const result = await DB.prepare(
     `SELECT wn.*, cu.name as customer_name FROM whatsapp_numbers wn
-     JOIN customers cu ON cu.id = wn.customer_id ORDER BY wn.created_at DESC`
+     JOIN customers cu ON cu.id = wn.customer_id
+     WHERE wn.is_shared = 0
+     ORDER BY wn.created_at DESC`
   ).all()
   return c.json({ numbers: result.results })
 })
@@ -415,6 +426,62 @@ admin.put('/whatsapp-numbers/:id', async (c) => {
 admin.delete('/whatsapp-numbers/:id', async (c) => {
   const { DB } = c.env
   await DB.prepare('DELETE FROM whatsapp_numbers WHERE id = ?').bind(c.req.param('id')).run()
+  return c.json({ success: true })
+})
+
+// ---------------------- Shared (multi-tenant) platform number ----------------------
+// Exactly one whatsapp_numbers row can be the platform's shared number
+// (customer_id = NULL, is_shared = 1). Customers on a 'shared'-mode package
+// don't get a dedicated number; instead their end-users message this single
+// number and identify their office by sending "<اسم المكتب> تفعيل" once.
+admin.get('/shared-number', async (c) => {
+  const { DB } = c.env
+  const row = await DB.prepare('SELECT * FROM whatsapp_numbers WHERE is_shared = 1 LIMIT 1').first<any>()
+  return c.json({ number: row || null })
+})
+
+// Create or update the platform's shared number. Uses the same platform-wide
+// Meta settings (WABA ID/token) + phone-number-only lookup as private numbers.
+admin.post('/shared-number', async (c) => {
+  const { DB } = c.env
+  const { display_name, phone_number } = await c.req.json()
+  if (!display_name || !phone_number) return c.json({ error: 'بيانات ناقصة' }, 400)
+
+  const meta = await getMetaSettings(DB)
+  if (!meta) {
+    return c.json({ error: 'لم يتم ربط حساب واتساب الأعمال (Meta) بعد. اذهب إلى "إعدادات واتساب" وأدخل WABA ID والـ Access Token مرة واحدة أولاً.' }, 400)
+  }
+
+  let matched
+  try {
+    const numbers = await fetchPhoneNumbersForWaba(meta.waba_id, meta.access_token)
+    matched = findMatchingWabaNumber(numbers, phone_number)
+  } catch (err: any) {
+    return c.json({ error: `فشل الاتصال بـ Meta: ${err?.message || err}` }, 400)
+  }
+  if (!matched) {
+    return c.json({ error: 'لم يتم العثور على هذا الرقم تحت حساب واتساب الأعمال المربوط بالمنصة. تأكد أن الرقم أُضيف فعلياً في Meta Business Manager.' }, 404)
+  }
+
+  const existing = await DB.prepare('SELECT id FROM whatsapp_numbers WHERE is_shared = 1 LIMIT 1').first<{ id: number }>()
+  if (existing) {
+    await DB.prepare(
+      `UPDATE whatsapp_numbers SET display_name=?, phone_number=?, phone_number_id=?, waba_id=?, access_token=?, status='connected' WHERE id=?`
+    ).bind(display_name, matched.display_phone_number, matched.id, meta.waba_id, meta.access_token, existing.id).run()
+    return c.json({ success: true, id: existing.id, phone_number_id: matched.id })
+  }
+
+  const result = await DB.prepare(
+    `INSERT INTO whatsapp_numbers (customer_id, is_shared, display_name, phone_number, phone_number_id, waba_id, access_token, status)
+     VALUES (NULL, 1, ?, ?, ?, ?, ?, 'connected')`
+  ).bind(display_name, matched.display_phone_number, matched.id, meta.waba_id, meta.access_token).run()
+
+  return c.json({ success: true, id: result.meta.last_row_id, phone_number_id: matched.id })
+})
+
+admin.delete('/shared-number', async (c) => {
+  const { DB } = c.env
+  await DB.prepare('DELETE FROM whatsapp_numbers WHERE is_shared = 1').run()
   return c.json({ success: true })
 })
 

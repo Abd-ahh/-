@@ -24,6 +24,7 @@ export interface PackageRow {
   currency: string
   is_active: number
   sort_order: number
+  number_mode: 'private' | 'shared'
   created_at: string
 }
 
@@ -53,7 +54,8 @@ export interface SubscriptionRow {
 
 export interface WhatsAppNumberRow {
   id: number
-  customer_id: number
+  customer_id: number | null // null = platform-owned shared number (is_shared = 1)
+  is_shared: number // 1 = this is the platform's single shared WhatsApp number
   display_name: string
   phone_number: string
   phone_number_id: string | null
@@ -62,6 +64,19 @@ export interface WhatsAppNumberRow {
   status: string
   extraction_fields: string | null // JSON array of field keys, null = all fields
   created_at: string
+}
+
+// Binds an end-user's WhatsApp number (talking to the shared platform number)
+// to a specific office/customer, after they send "<office name> تفعيل" once.
+// Expires 30 days after the last interaction (renewed on each message).
+export interface SharedNumberSessionRow {
+  id: number
+  whatsapp_number_id: number
+  sender_phone: string
+  customer_id: number
+  expires_at: string
+  created_at: string
+  updated_at: string
 }
 
 export interface OperationRow {

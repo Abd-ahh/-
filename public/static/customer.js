@@ -156,6 +156,29 @@ function statMini(label, value) {
 async function renderNumbers(area) {
   const { data } = await axios.get(`${API}/dashboard`);
   numbersCache = data.numbers;
+
+  if (data.shared_link) {
+    const link = data.shared_link;
+    area.innerHTML = `
+      <div class="bg-white rounded-2xl border border-amber-200 p-8 max-w-xl mx-auto text-center">
+        <div class="w-14 h-14 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto mb-4">
+          <i class="fa-solid fa-people-group text-xl"></i>
+        </div>
+        <h3 class="font-bold text-lg mb-2">مكتبك يستخدم الرقم المشترك للمنصة</h3>
+        <p class="text-sm text-gray-500 mb-5">شارك هذا الرابط مع عملائك — بمجرد الضغط عليه سيُفتح واتساب مع رسالة جاهزة لربط رقمهم بمكتبك تلقائياً "${link.office_name}". لا حاجة لأي إعداد إضافي.</p>
+        <div class="bg-gray-50 rounded-xl p-4 text-left mb-4 flex items-center justify-between gap-3" dir="ltr">
+          <span id="shared-link-text" class="text-xs text-gray-600 break-all">${link.deep_link}</span>
+          ${copyBtn(link.deep_link)}
+        </div>
+        <a href="${link.deep_link}" target="_blank" class="inline-block bg-emerald-500 hover:bg-emerald-600 text-white font-bold px-6 py-3 rounded-xl text-sm">
+          <i class="fa-brands fa-whatsapp ml-1"></i> فتح الرابط في واتساب
+        </a>
+        <p class="text-xs text-gray-400 mt-5">أو أرسل عملاؤك يدوياً هذه الرسالة إلى الرقم المشترك: <br/><span class="font-bold">${link.office_name} تفعيل</span></p>
+      </div>
+    `;
+    return;
+  }
+
   area.innerHTML = `
     <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
       <table class="w-full text-sm">

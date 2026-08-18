@@ -4,6 +4,9 @@ import type { WhatsAppWebhookBody } from '../lib/whatsapp'
 import { downloadMedia, sendTextMessage, markMessageRead } from '../lib/whatsapp'
 import { extractPassportData } from '../lib/gemini'
 import { AVAILABLE_FIELDS, parseExtractionFields } from '../lib/fields'
+import { extractOfficeActivationCode, matchOfficeByName } from '../lib/office'
+
+const SHARED_SESSION_DAYS = 30
 
 const webhook = new Hono<AppEnv>()
 
@@ -95,7 +98,76 @@ async function handleIncomingMessage(params: {
 
   markMessageRead(phoneNumberId, accessToken, messageId, WHATSAPP_API_VERSION).catch(() => {})
 
-  const customerId = numberRow.customer_id as number
+  let customerId: number | null = numberRow.customer_id as number | null
+
+  // ---------------- Shared/multi-tenant number resolution ----------------
+  // This number has no single owner (is_shared = 1). The sender must first
+  // send "<اسم المكتب> تفعيل" once to bind their number to an office; after
+  // that a session row resolves them automatically for 30 days (renewed on
+  // every successful interaction).
+  if (numberRow.is_shared) {
+    const messageText: string = msg.type === 'text' ? (msg.text?.body || '') : ''
+    const officeNameRaw = extractOfficeActivationCode(messageText)
+
+    if (officeNameRaw) {
+      // Activation attempt: match against customers on a 'shared' package
+      const candidates = await DB.prepare(
+        `SELECT DISTINCT cu.id, cu.name FROM customers cu
+         JOIN subscriptions s ON s.customer_id = cu.id
+         JOIN packages p ON p.id = s.package_id
+         WHERE p.number_mode = 'shared' AND s.status = 'active' AND s.end_date >= datetime('now')`
+      ).all<{ id: number; name: string }>()
+
+      const matched = matchOfficeByName(candidates.results || [], officeNameRaw)
+      if (!matched) {
+        await sendTextMessage(
+          phoneNumberId, accessToken, senderPhone,
+          `⚠️ لم يتم العثور على مكتب باسم "${officeNameRaw}". تأكد من كتابة اسم المكتب بشكل صحيح متبوعاً بكلمة "تفعيل"، مثال: معالم الرياض 11 تفعيل`,
+          WHATSAPP_API_VERSION
+        ).catch(() => {})
+        return
+      }
+
+      const expiresAt = new Date(Date.now() + SHARED_SESSION_DAYS * 24 * 60 * 60 * 1000).toISOString()
+      await DB.prepare(
+        `INSERT INTO shared_number_sessions (whatsapp_number_id, sender_phone, customer_id, expires_at, updated_at)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(whatsapp_number_id, sender_phone) DO UPDATE SET customer_id=excluded.customer_id, expires_at=excluded.expires_at, updated_at=datetime('now')`
+      ).bind(numberRow.id, senderPhone, matched.id, expiresAt).run()
+
+      await sendTextMessage(
+        phoneNumberId, accessToken, senderPhone,
+        `تم الربط بمكتب ${matched.name} ✅ أرسل الآن صورة جواز السفر`,
+        WHATSAPP_API_VERSION
+      ).catch(() => {})
+      return
+    }
+
+    // Not an activation message: look up an existing (non-expired) session
+    const session = await DB.prepare(
+      `SELECT * FROM shared_number_sessions WHERE whatsapp_number_id = ? AND sender_phone = ? AND expires_at >= datetime('now')`
+    ).bind(numberRow.id, senderPhone).first<any>()
+
+    if (!session) {
+      await sendTextMessage(
+        phoneNumberId, accessToken, senderPhone,
+        '👋 مرحباً! أرسل اسم مكتبك متبوعاً بكلمة "تفعيل" لربط رقمك، مثال: معالم الرياض 11 تفعيل',
+        WHATSAPP_API_VERSION
+      ).catch(() => {})
+      return
+    }
+
+    customerId = session.customer_id as number
+    // Renew the session on every successful interaction
+    const newExpiresAt = new Date(Date.now() + SHARED_SESSION_DAYS * 24 * 60 * 60 * 1000).toISOString()
+    DB.prepare(`UPDATE shared_number_sessions SET expires_at=?, updated_at=datetime('now') WHERE id=?`)
+      .bind(newExpiresAt, session.id).run().catch(() => {})
+  }
+
+  if (!customerId) {
+    console.warn(`Unable to resolve customer for phone_number_id=${phoneNumberId}, sender=${senderPhone}`)
+    return
+  }
 
   // Fetch customer preferences
   const customer = await DB.prepare('SELECT * FROM customers WHERE id = ?').bind(customerId).first<any>()

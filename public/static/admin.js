@@ -7,6 +7,7 @@ let packagesCache = [];
 let customersCache = [];
 let numbersCache = [];
 let fieldsCache = [];
+let sharedNumberCache = null;
 
 // ---------------- Platform-wide Meta connection (linked once for the whole platform) ----------------
 // WABA ID + Access Token are entered ONE time in "إعدادات واتساب" and stored server-side.
@@ -330,7 +331,11 @@ async function renderPackages(area) {
             ${p.is_active ? statusBadge('active') : statusBadge('suspended')}
           </div>
           <p class="text-2xl font-extrabold text-gray-900 mb-1">${p.price} <span class="text-sm text-gray-400 font-normal">${p.currency}/شهرياً</span></p>
-          <p class="text-sm text-gray-500 mb-4">${p.max_numbers} رقم — ${p.monthly_operations} عملية شهرياً</p>
+          <p class="text-sm text-gray-500 mb-2">${p.max_numbers} رقم — ${p.monthly_operations} عملية شهرياً</p>
+          <p class="text-xs font-bold mb-4 ${p.number_mode === 'shared' ? 'text-amber-600' : 'text-brand-600'}">
+            <i class="fa-solid ${p.number_mode === 'shared' ? 'fa-people-group' : 'fa-lock'} ml-1"></i>
+            ${p.number_mode === 'shared' ? 'رقم واتساب مشترك للمنصة' : 'رقم واتساب خاص بالعميل'}
+          </p>
           <div class="flex gap-2">
             <button onclick="editPackage(${p.id})" class="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-bold py-2 rounded-lg">تعديل</button>
             <button onclick="deletePackage(${p.id})" class="bg-red-50 hover:bg-red-100 text-red-600 text-sm font-bold px-3 py-2 rounded-lg"><i class="fa-solid fa-trash"></i></button>
@@ -344,7 +349,7 @@ async function renderPackages(area) {
 
 window.openPackageModal = function (pkg) {
   const modal = document.getElementById('modal-root');
-  const p = pkg || { name_ar: '', name_en: '', max_numbers: 1, monthly_operations: 500, price: 0, currency: 'SAR', sort_order: 0, is_active: 1 };
+  const p = pkg || { name_ar: '', name_en: '', max_numbers: 1, monthly_operations: 500, price: 0, currency: 'SAR', sort_order: 0, is_active: 1, number_mode: 'private' };
   modal.innerHTML = `
     <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div class="bg-white rounded-2xl p-6 w-full max-w-md">
@@ -359,6 +364,13 @@ window.openPackageModal = function (pkg) {
           <div class="grid grid-cols-2 gap-3">
             <input id="pk-price" type="number" value="${p.price}" placeholder="السعر" class="border border-gray-200 rounded-xl px-4 py-2.5" />
             <input id="pk-currency" value="${p.currency}" placeholder="العملة" class="border border-gray-200 rounded-xl px-4 py-2.5" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-500 mb-1.5">نوع رقم واتساب لعملاء هذه الباقة</label>
+            <select id="pk-number-mode" class="w-full border border-gray-200 rounded-xl px-4 py-2.5">
+              <option value="private" ${p.number_mode !== 'shared' ? 'selected' : ''}>خاص — رقم واتساب مستقل لكل عميل</option>
+              <option value="shared" ${p.number_mode === 'shared' ? 'selected' : ''}>مشترك — يستخدم رقم المنصة الموحد (تفعيل فوري بدون إعداد)</option>
+            </select>
           </div>
         </div>
         <div class="flex gap-3 mt-5">
@@ -383,6 +395,7 @@ window.submitPackage = async function (id) {
     monthly_operations: Number(document.getElementById('pk-ops').value),
     price: Number(document.getElementById('pk-price').value),
     currency: document.getElementById('pk-currency').value,
+    number_mode: document.getElementById('pk-number-mode').value,
     is_active: 1
   };
   try {
@@ -405,10 +418,13 @@ window.deletePackage = async function (id) {
 async function renderNumbers(area) {
   const { data } = await axios.get(`${API}/whatsapp-numbers`);
   const { data: custData } = await axios.get(`${API}/customers`);
+  const { data: sharedData } = await axios.get(`${API}/shared-number`);
   const meta = await getMetaSettings(true);
   customersCache = custData.customers;
   numbersCache = data.numbers;
+  sharedNumberCache = sharedData.number;
   const connected = !!meta.has_token;
+  const shared = sharedData.number;
   area.innerHTML = `
     <div class="flex items-center justify-between mb-5 gap-3 flex-wrap">
       <div class="flex items-center gap-2 text-xs font-bold ${connected ? 'text-emerald-600' : 'text-amber-600'}">
@@ -417,6 +433,20 @@ async function renderNumbers(area) {
         <button onclick="openMetaSettingsModal()" class="underline font-bold text-gray-500">${connected ? 'تغيير الإعدادات' : 'ربط الآن'}</button>
       </div>
       <button onclick="openNumberModal()" class="bg-brand-600 hover:bg-brand-700 text-white font-bold px-5 py-2.5 rounded-xl text-sm"><i class="fa-solid fa-plus ml-1"></i> ربط رقم جديد</button>
+    </div>
+    <div class="bg-white rounded-2xl border-2 ${shared ? 'border-amber-200' : 'border-dashed border-gray-200'} p-5 mb-6">
+      <div class="flex items-center justify-between flex-wrap gap-3">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center"><i class="fa-solid fa-people-group"></i></div>
+          <div>
+            <p class="font-bold text-gray-900 text-sm">الرقم المشترك للمنصة (لعملاء الباقات ذات النمط "مشترك")</p>
+            <p class="text-xs text-gray-400">${shared ? `${shared.display_name} — ${shared.phone_number}` : 'لم يتم تحديد رقم مشترك بعد'}</p>
+          </div>
+        </div>
+        <button onclick="openSharedNumberModal()" class="bg-amber-500 hover:bg-amber-600 text-white font-bold px-4 py-2 rounded-xl text-xs">
+          ${shared ? 'تغيير الرقم المشترك' : 'تحديد الرقم المشترك'}
+        </button>
+      </div>
     </div>
     <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
       <table class="w-full text-sm">
@@ -649,6 +679,66 @@ window.autoFixNumber = async function (numberId) {
     render();
   } catch (err) {
     alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+// ---------------- Shared platform number modal ----------------
+window.openSharedNumberModal = async function () {
+  const meta = await getMetaSettings(true);
+  const shared = sharedNumberCache;
+  const modal = document.getElementById('modal-root');
+  if (!meta.has_token) {
+    modal.innerHTML = `
+      <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-2xl p-6 w-full max-w-md text-center">
+          <p class="text-gray-600 mb-4">يجب ربط حساب واتساب الأعمال بالمنصة أولاً قبل تحديد الرقم المشترك.</p>
+          <button onclick="closeModal(); openMetaSettingsModal();" class="bg-brand-600 text-white font-bold px-5 py-2.5 rounded-xl">ربط الحساب الآن</button>
+        </div>
+      </div>`;
+    return;
+  }
+  modal.innerHTML = `
+    <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-2xl p-6 w-full max-w-md">
+        <h3 class="font-bold text-lg mb-1">الرقم المشترك للمنصة</h3>
+        <p class="text-xs text-gray-400 mb-4">هذا الرقم يخدم كل عملاء الباقات ذات النمط "مشترك". كل عميل يحصل على رابط واتساب خاص بمكتبه (بنفس الرقم)، ويرسل عملاؤه اسم المكتب + كلمة "تفعيل" مرة واحدة للربط.</p>
+        <div class="space-y-3">
+          <input id="sn-name" value="${shared ? shared.display_name : ''}" placeholder="اسم العرض (مثال: الرقم الموحد للمنصة)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="sn-phone" value="${shared ? shared.phone_number : ''}" placeholder="رقم الهاتف (كما هو مسجل في Meta)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" dir="ltr" />
+        </div>
+        <div id="sn-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-3"></div>
+        <div class="flex gap-3 mt-5">
+          <button onclick="saveSharedNumber()" id="sn-save-btn" class="flex-1 bg-amber-500 hover:bg-amber-600 text-white font-bold py-2.5 rounded-xl">حفظ</button>
+          <button onclick="closeModal()" class="flex-1 bg-gray-100 text-gray-700 font-bold py-2.5 rounded-xl">إلغاء</button>
+        </div>
+      </div>
+    </div>
+  `;
+};
+
+window.saveSharedNumber = async function () {
+  const display_name = document.getElementById('sn-name').value.trim();
+  const phone_number = document.getElementById('sn-phone').value.trim();
+  const errEl = document.getElementById('sn-error');
+  const btn = document.getElementById('sn-save-btn');
+  errEl.classList.add('hidden');
+  if (!display_name || !phone_number) {
+    errEl.textContent = 'الرجاء تعبئة جميع الحقول';
+    errEl.classList.remove('hidden');
+    return;
+  }
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin ml-1"></i> جارِ الحفظ...';
+  try {
+    await axios.post(`${API}/shared-number`, { display_name, phone_number });
+    closeModal();
+    render();
+  } catch (err) {
+    errEl.textContent = err?.response?.data?.error || 'حدث خطأ';
+    errEl.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'حفظ';
   }
 };
 
