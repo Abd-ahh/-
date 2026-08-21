@@ -28,12 +28,17 @@ const EXTRACTION_PROMPT = `أنت محرك تحليل وثائق رسمية مت
   "confidence": 0.0
 }`
 
-const GEMINI_MODEL = 'gemini-flash-latest'
-// Google's shared "flash-latest" alias occasionally returns a transient
-// 503 "model overloaded / high demand" error (observed in production —
-// same request succeeds seconds later). Retry a couple of times with a
-// short backoff before giving up, instead of failing the whole WhatsApp
-// message on the first transient hiccup.
+// "gemini-flash-latest" was found in production (2026-08-21) to fail with a
+// transient 503 "high demand" error on a large fraction of requests (3 out
+// of 5 back-to-back identical requests failed in testing). Switched the
+// primary model to "gemini-flash-lite-latest", which returned 200 on 5/5
+// requests with the same passport image and produced equally accurate
+// extraction — while also being noticeably faster.
+const GEMINI_MODEL = 'gemini-flash-lite-latest'
+// Kept as an extra safety net in case Google's infra has another rough
+// patch: retry a couple of times with a short backoff on transient errors
+// before giving up, instead of failing the whole WhatsApp message on the
+// first hiccup.
 const MAX_RETRIES = 2
 const RETRY_DELAY_MS = 1500
 
