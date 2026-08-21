@@ -177,6 +177,7 @@ async function renderNumbers(area) {
         ${link.deactivation_text ? `<p class="text-xs text-gray-400 mt-2">لإلغاء الربط يرسل عميلك: <br/><span class="font-bold">${link.deactivation_text}</span></p>` : ''}
         <p class="text-xs text-brand-600 mt-4"><i class="fa-solid fa-gear ml-1"></i> يمكنك تخصيص أوامر التفعيل والإيقاف من تبويب "الإعدادات"</p>
       </div>
+      ${renderGroupsSection(data.groups || [], link.activation_text)}
     `;
     return;
   }
@@ -201,6 +202,44 @@ async function renderNumbers(area) {
     <div id="modal-root"></div>
   `;
 }
+
+// ---------------- WhatsApp group bridge section ----------------
+// Groups are activated by a member sending the office activation text
+// inside an unofficial WhatsApp group (added via a separate bridge number
+// managed by the platform, since official numbers can't join groups). This
+// section is read-only visibility + unlink; activation itself always
+// happens from inside WhatsApp, not from this dashboard.
+function renderGroupsSection(groups, activationText) {
+  return `
+    <div class="bg-white rounded-2xl border border-gray-100 p-6 max-w-xl mx-auto mt-6">
+      <h3 class="font-bold text-gray-900 mb-1"><i class="fa-solid fa-people-group ml-1 text-brand-600"></i> مجموعات واتساب المفعّلة لمكتبك</h3>
+      <p class="text-xs text-gray-400 mb-4">إذا انضم رقم البوت الخاص بالمجموعات لمجموعة واتساب لديك، يرسل أي عضو بالمجموعة "${activationText}" مرة واحدة لربطها، وبعدها يمكن لأي عضو إرسال صور الجوازات داخل المجموعة نفسها.</p>
+      ${groups.length ? `
+        <div class="space-y-2">
+          ${groups.map(g => `
+            <div class="flex items-center justify-between bg-gray-50 rounded-xl px-4 py-3">
+              <div>
+                <p class="font-semibold text-sm">${g.group_name || 'مجموعة بدون اسم'}</p>
+                <p class="text-xs text-gray-400">مفعّلة منذ ${fmtDate(g.created_at)}</p>
+              </div>
+              <button onclick="unlinkGroup(${g.id})" class="text-xs font-bold text-red-500 hover:text-red-700">إلغاء الربط</button>
+            </div>
+          `).join('')}
+        </div>
+      ` : `<p class="text-sm text-gray-400 text-center py-4">لا توجد مجموعات مفعّلة حالياً</p>`}
+    </div>
+  `;
+}
+
+window.unlinkGroup = async function (groupId) {
+  if (!confirm('تأكيد إلغاء ربط هذه المجموعة؟ لن تُعالج صور الجوازات منها بعد الآن حتى يُعاد تفعيلها.')) return;
+  try {
+    await axios.delete(`${API}/groups/${groupId}`);
+    render();
+  } catch (err) {
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
 
 // ---------------- Extraction fields modal ----------------
 window.openFieldsModal = async function (numberId) {

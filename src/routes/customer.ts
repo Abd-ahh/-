@@ -70,13 +70,36 @@ customer.get('/dashboard', async (c) => {
     }
   }
 
+  // WhatsApp groups linked to this office via the unofficial group bridge
+  // (only relevant for shared-mode customers, but harmless to fetch always).
+  const groups = await DB.prepare(
+    'SELECT id, group_jid, group_name, created_at, updated_at FROM whatsapp_groups WHERE customer_id = ? ORDER BY created_at DESC'
+  ).bind(id).all()
+
   return c.json({
     numbers: numbers.results,
     active_subscription: activeSub || null,
     operations_stats: opsStats,
     recent_operations: recentOps.results,
-    shared_link: sharedLink
+    shared_link: sharedLink,
+    groups: groups.results
   })
+})
+
+// Let the office unlink one of its WhatsApp groups from the bridge (e.g. a
+// group was activated by mistake, or the office no longer uses it).
+customer.delete('/groups/:id', async (c) => {
+  const { DB } = c.env
+  const customerId = c.get('customer')!.id
+  const groupId = c.req.param('id')
+
+  const owned = await DB.prepare('SELECT id FROM whatsapp_groups WHERE id = ? AND customer_id = ?')
+    .bind(groupId, customerId)
+    .first()
+  if (!owned) return c.json({ error: 'المجموعة غير موجودة أو لا تخص مكتبك' }, 404)
+
+  await DB.prepare('DELETE FROM whatsapp_groups WHERE id = ?').bind(groupId).run()
+  return c.json({ success: true })
 })
 
 // Let the customer choose which fields the bot extracts/replies with for a

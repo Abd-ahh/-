@@ -104,6 +104,7 @@ export function adminDashboardPage(): string {
         <button data-tab="customers" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-users w-5"></i> العملاء</button>
         <button data-tab="packages" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-box w-5"></i> الباقات</button>
         <button data-tab="numbers" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-brands fa-whatsapp w-5"></i> أرقام واتساب</button>
+        <button data-tab="groups" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-people-group w-5"></i> مجموعات واتساب</button>
         <button data-tab="operations" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-list-check w-5"></i> سجل العمليات</button>
         <button data-tab="test" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-flask w-5"></i> اختبار الاستخراج</button>
       </nav>

@@ -532,6 +532,27 @@ admin.delete('/shared-number', async (c) => {
   return c.json({ success: true })
 })
 
+// ---------------------- WhatsApp group bridge (unofficial) ----------------------
+// Read-only visibility for the admin over groups activated via the external
+// Baileys bridge (see /webhook/bridge/message). Admin can unlink a
+// misactivated/abandoned group; the bridge process itself lives on a
+// separate VPS outside this Worker's control.
+admin.get('/whatsapp-groups', async (c) => {
+  const { DB } = c.env
+  const result = await DB.prepare(
+    `SELECT g.*, cu.name as customer_name FROM whatsapp_groups g
+     JOIN customers cu ON cu.id = g.customer_id
+     ORDER BY g.created_at DESC`
+  ).all()
+  return c.json({ groups: result.results })
+})
+
+admin.delete('/whatsapp-groups/:id', async (c) => {
+  const { DB } = c.env
+  await DB.prepare('DELETE FROM whatsapp_groups WHERE id = ?').bind(c.req.param('id')).run()
+  return c.json({ success: true })
+})
+
 // ---------------------- Operations log ----------------------
 admin.get('/operations', async (c) => {
   const { DB } = c.env

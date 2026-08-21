@@ -87,7 +87,7 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
 
 const titles = {
   overview: 'نظرة عامة', customers: 'العملاء', packages: 'الباقات',
-  numbers: 'أرقام واتساب', operations: 'سجل العمليات', test: 'اختبار الاستخراج'
+  numbers: 'أرقام واتساب', groups: 'مجموعات واتساب', operations: 'سجل العمليات', test: 'اختبار الاستخراج'
 };
 
 function switchTab(tab) {
@@ -108,6 +108,7 @@ async function render() {
     else if (currentTab === 'customers') await renderCustomers(area);
     else if (currentTab === 'packages') await renderPackages(area);
     else if (currentTab === 'numbers') await renderNumbers(area);
+    else if (currentTab === 'groups') await renderGroups(area);
     else if (currentTab === 'operations') await renderOperations(area);
     else if (currentTab === 'test') await renderTest(area);
   } catch (err) {
@@ -506,6 +507,45 @@ async function renderNumbers(area) {
     <div id="modal-root"></div>
   `;
 }
+
+// ---------------- WhatsApp Group Bridge (unofficial, read-only + unlink) ----------------
+// Groups are activated from inside WhatsApp itself (a member sends the
+// office's activation text in the group); this tab just gives the admin
+// visibility into which groups are linked to which office, and lets them
+// force-unlink one if needed. The bridge process (Baileys) runs on a
+// separate VPS and is managed outside this dashboard.
+async function renderGroups(area) {
+  const { data } = await axios.get(`${API}/whatsapp-groups`);
+  area.innerHTML = `
+    <div class="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-xl p-4 mb-5">
+      <i class="fa-solid fa-circle-info ml-1"></i>
+      هذه المجموعات تُفعَّل تلقائياً من داخل واتساب (عضو يرسل "اسم المكتب تفعيل" داخل المجموعة بعد إضافة رقم الجسر لها) — هذه اللوحة لعرض الحالة وإلغاء الربط فقط.
+    </div>
+    <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
+          <th class="p-4 font-medium">اسم المجموعة</th><th class="p-4 font-medium">المكتب</th>
+          <th class="p-4 font-medium">تاريخ التفعيل</th><th class="p-4 font-medium"></th>
+        </tr></thead>
+        <tbody>
+          ${data.groups.map(g => `
+            <tr class="border-b border-gray-50">
+              <td class="p-4 font-semibold">${g.group_name || '-'}</td>
+              <td class="p-4 text-gray-500">${g.customer_name}</td>
+              <td class="p-4 text-gray-400 text-xs">${fmtDate(g.created_at)}</td>
+              <td class="p-4"><button onclick="deleteGroup(${g.id})" class="text-red-500 hover:underline text-xs font-bold">إلغاء الربط</button></td>
+            </tr>`).join('') || '<tr><td colspan="4" class="p-8 text-center text-gray-400">لا توجد مجموعات مفعّلة حالياً</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+window.deleteGroup = async function (id) {
+  if (!confirm('تأكيد إلغاء ربط هذه المجموعة؟')) return;
+  await axios.delete(`${API}/whatsapp-groups/${id}`);
+  render();
+};
 
 // ---------------- Platform-wide Meta settings modal (one-time setup) ----------------
 window.openMetaSettingsModal = async function () {
