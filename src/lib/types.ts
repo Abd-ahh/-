@@ -1,6 +1,8 @@
 export type Bindings = {
   DB: D1Database
-  PASSPORTS_BUCKET: R2Bucket
+  // Optional: not every environment has R2 configured (requires a Cloudflare
+  // API token with R2 permissions). Code must guard before using it.
+  PASSPORTS_BUCKET?: R2Bucket
   GEMINI_API_KEY?: string
   JWT_SECRET?: string
   WHATSAPP_VERIFY_TOKEN?: string

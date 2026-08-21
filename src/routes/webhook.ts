@@ -72,7 +72,7 @@ webhook.post('/whatsapp', async (c) => {
 
 async function handleIncomingMessage(params: {
   DB: D1Database
-  PASSPORTS_BUCKET: R2Bucket
+  PASSPORTS_BUCKET?: R2Bucket
   GEMINI_API_KEY?: string
   WHATSAPP_API_VERSION?: string
   numberRow: any
@@ -278,9 +278,16 @@ async function handleIncomingMessage(params: {
 
     const media = await downloadMedia(msg.image.id, accessToken, WHATSAPP_API_VERSION)
 
-    // Store image in R2 for audit trail (best-effort, non-blocking on failure)
+    // Store image in R2 for audit trail (best-effort, non-blocking on failure).
+    // R2 binding may not be configured on every environment — guard against
+    // that instead of throwing (was previously causing "Cannot read
+    // properties of undefined (reading 'put')" and aborting the whole flow).
     const imageKey = `passports/${customerId}/${operationId}-${Date.now()}.jpg`
-    PASSPORTS_BUCKET.put(imageKey, media.bytes, { httpMetadata: { contentType: media.mimeType } }).catch(() => {})
+    if (PASSPORTS_BUCKET) {
+      PASSPORTS_BUCKET.put(imageKey, media.bytes, { httpMetadata: { contentType: media.mimeType } }).catch((err) => {
+        console.error('R2 put failed', err)
+      })
+    }
 
     const extraction = await extractPassportData(GEMINI_API_KEY, media.base64, media.mimeType)
     const processingTime = Date.now() - startTime
