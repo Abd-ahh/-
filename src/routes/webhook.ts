@@ -296,7 +296,14 @@ async function handleIncomingMessage(params: {
       await DB.prepare(
         `UPDATE operations SET status='failed', image_key=?, error_message=?, extracted_json=?, processing_time_ms=? WHERE id=?`
       ).bind(imageKey, 'الصورة ليست جواز سفر', JSON.stringify(extraction), processingTime, operationId).run()
-      await sendTextMessage(phoneNumberId, accessToken, senderPhone, T.notPassport, WHATSAPP_API_VERSION)
+      // Sending the WhatsApp reply is a best-effort side effect at this
+      // point — the extraction outcome is already persisted, so a network
+      // hiccup or a WhatsApp-side send failure (e.g. recipient not in the
+      // allowed list on a test number) must NOT propagate to the outer
+      // catch below and overwrite the already-correct operation status.
+      await sendTextMessage(phoneNumberId, accessToken, senderPhone, T.notPassport, WHATSAPP_API_VERSION).catch((err) =>
+        console.error('sendTextMessage (notPassport) failed', err)
+      )
       return
     }
 
@@ -304,7 +311,9 @@ async function handleIncomingMessage(params: {
       await DB.prepare(
         `UPDATE operations SET status='unclear', image_key=?, error_message=?, extracted_json=?, processing_time_ms=? WHERE id=?`
       ).bind(imageKey, extraction.clarity_reason || 'الصورة غير واضحة', JSON.stringify(extraction), processingTime, operationId).run()
-      await sendTextMessage(phoneNumberId, accessToken, senderPhone, T.unclear(extraction.clarity_reason || ''), WHATSAPP_API_VERSION)
+      await sendTextMessage(phoneNumberId, accessToken, senderPhone, T.unclear(extraction.clarity_reason || ''), WHATSAPP_API_VERSION).catch((err) =>
+        console.error('sendTextMessage (unclear) failed', err)
+      )
       return
     }
 
@@ -329,7 +338,14 @@ async function handleIncomingMessage(params: {
       DB.prepare('UPDATE subscriptions SET operations_used = operations_used + 1 WHERE id = ?').bind(activeSub.id)
     ])
 
-    await sendTextMessage(phoneNumberId, accessToken, senderPhone, T.result(extraction), WHATSAPP_API_VERSION)
+    // Extraction succeeded and is already persisted + quota already
+    // incremented above. If sending the reply itself fails (WhatsApp API
+    // error, e.g. recipient not in the allowed list on a test number),
+    // that must NOT be reported back to the user as a processing error —
+    // the operation record correctly shows 'success' either way.
+    await sendTextMessage(phoneNumberId, accessToken, senderPhone, T.result(extraction), WHATSAPP_API_VERSION).catch((err) =>
+      console.error('sendTextMessage (result) failed', err)
+    )
   } catch (err: any) {
     console.error('Passport processing error', err)
     await DB.prepare(`UPDATE operations SET status='failed', error_message=? WHERE id=?`)
