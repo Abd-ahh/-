@@ -7,6 +7,11 @@ export type Bindings = {
   JWT_SECRET?: string
   WHATSAPP_VERIFY_TOKEN?: string
   WHATSAPP_API_VERSION?: string
+  // Shared secret used to authenticate requests coming from the external
+  // WhatsApp-group bridge process (Baileys, running on a separate VPS since
+  // Meta's official Cloud API cannot join/receive messages from groups).
+  // The bridge sends it in the X-Bridge-Secret header on every request.
+  BRIDGE_SECRET?: string
 }
 
 export type Variables = {
@@ -75,6 +80,18 @@ export interface WhatsAppNumberRow {
 // Binds an end-user's WhatsApp number (talking to the shared platform number)
 // to a specific office/customer, after they send "<office name> تفعيل" once.
 // Expires 30 days after the last interaction (renewed on each message).
+// Binds an unofficial WhatsApp group (via the Baileys bridge) to a specific
+// office/customer, after a member sends "<office name> تفعيل" once inside it.
+export interface WhatsAppGroupRow {
+  id: number
+  group_jid: string
+  group_name: string | null
+  customer_id: number
+  activated_by_jid: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface SharedNumberSessionRow {
   id: number
   whatsapp_number_id: number

@@ -377,4 +377,226 @@ function buildResultMessage(r: any, lang: 'ar' | 'en', extractionFieldsRaw: stri
   return lines.join('\n')
 }
 
+// =========================================================
+// WhatsApp GROUP bridge endpoint
+// =========================================================
+// Meta's official Cloud API cannot join or receive messages from WhatsApp
+// groups (hard platform restriction — see README). To support offices whose
+// workflow is centered on a shared WhatsApp group, a separate unofficial
+// bridge process (Baileys, running on an external VPS, connected as a normal
+// personal WhatsApp number added into each office's group by a human) POSTs
+// every group text/image message here. This endpoint runs the exact same
+// office-matching + Gemini extraction pipeline as the official number, just
+// keyed by group JID instead of phone_number_id/session, and returns a
+// plain { reply } string for the bridge to send back into the group —
+// it never talks to Meta's Graph API directly.
+webhook.post('/bridge/message', async (c) => {
+  const { DB, GEMINI_API_KEY, BRIDGE_SECRET } = c.env
+
+  // The bridge is an unofficial process on our own VPS — require a shared
+  // secret so this endpoint can't be hit by anyone who finds the URL.
+  if (!BRIDGE_SECRET || c.req.header('x-bridge-secret') !== BRIDGE_SECRET) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+
+  let payload: {
+    group_jid?: string
+    group_name?: string
+    sender_jid?: string
+    type?: 'text' | 'image'
+    text?: string
+    image_base64?: string
+    mime_type?: string
+  }
+  try {
+    payload = await c.req.json()
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+
+  const { group_jid, group_name, sender_jid, type, text, image_base64, mime_type } = payload
+  if (!group_jid || !sender_jid || !type) {
+    return c.json({ error: 'group_jid, sender_jid and type are required' }, 400)
+  }
+
+  const startTime = Date.now()
+
+  const existingGroup = await DB.prepare('SELECT * FROM whatsapp_groups WHERE group_jid = ?').bind(group_jid).first<any>()
+
+  // ---------------- Text message: activation / deactivation ----------------
+  if (type === 'text') {
+    const messageText = text || ''
+
+    // Deactivation (only if the group is already linked)
+    if (existingGroup && messageText) {
+      const linkedCustomer = await DB.prepare('SELECT deactivation_code FROM customers WHERE id = ?')
+        .bind(existingGroup.customer_id).first<{ deactivation_code: string | null }>()
+      if (linkedCustomer?.deactivation_code) {
+        const isDeactivation = matchByCustomCommand(
+          [{ id: existingGroup.id, code: linkedCustomer.deactivation_code }],
+          messageText
+        )
+        if (isDeactivation) {
+          await DB.prepare('DELETE FROM whatsapp_groups WHERE id = ?').bind(existingGroup.id).run()
+          return c.json({ reply: '✅ تم إلغاء ربط هذه المجموعة بالمكتب. أرسل اسم المكتب متبوعاً بكلمة "تفعيل" للربط من جديد.' })
+        }
+      }
+    }
+
+    // Activation attempt (custom command first, then name pattern) — same
+    // office pool used by the shared official number.
+    const candidates = await DB.prepare(
+      `SELECT DISTINCT cu.id, cu.name, cu.activation_code FROM customers cu
+       JOIN subscriptions s ON s.customer_id = cu.id
+       JOIN packages p ON p.id = s.package_id
+       WHERE p.number_mode = 'shared' AND s.status = 'active' AND s.end_date >= datetime('now')`
+    ).all<{ id: number; name: string; activation_code: string | null }>()
+    const allCandidates = candidates.results || []
+
+    let matched: { id: number; name: string } | null = null
+
+    const customMatch = matchByCustomCommand(
+      allCandidates.filter((cc) => !!cc.activation_code).map((cc) => ({ id: cc.id, name: cc.name, code: cc.activation_code })),
+      messageText
+    )
+    if (customMatch) matched = { id: customMatch.id, name: customMatch.name }
+
+    const officeNameRaw = !matched ? extractOfficeActivationCode(messageText) : null
+    if (!matched && officeNameRaw) {
+      const nameCandidates = allCandidates.filter((cc) => !cc.activation_code)
+      matched = matchOfficeByName(nameCandidates, officeNameRaw)
+    }
+
+    if (matched) {
+      await DB.prepare(
+        `INSERT INTO whatsapp_groups (group_jid, group_name, customer_id, activated_by_jid, updated_at)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(group_jid) DO UPDATE SET customer_id=excluded.customer_id, group_name=excluded.group_name,
+           activated_by_jid=excluded.activated_by_jid, updated_at=datetime('now')`
+      ).bind(group_jid, group_name || null, matched.id, sender_jid).run()
+      return c.json({ reply: `تم ربط هذه المجموعة بمكتب ${matched.name} ✅ يمكن لأي عضو الآن إرسال صور جوازات السفر داخل المجموعة.` })
+    }
+
+    if (officeNameRaw) {
+      return c.json({ reply: `⚠️ لم يتم العثور على مكتب باسم "${officeNameRaw}". تأكد من كتابة اسم المكتب بشكل صحيح متبوعاً بكلمة "تفعيل".` })
+    }
+
+    if (!existingGroup) {
+      // Not an activation message and the group isn't linked yet — stay
+      // silent instead of replying to every unrelated chit-chat message in
+      // the group (unlike the 1:1 number where every message gets a reply).
+      return c.json({})
+    }
+
+    // Linked group, but this text message isn't a passport image and isn't
+    // an activation/deactivation command — stay silent (avoid spamming an
+    // active group conversation with guidance on every text message).
+    return c.json({})
+  }
+
+  // ---------------- Image message: run the extraction pipeline ----------------
+  if (!existingGroup) {
+    // Image sent before the group was ever activated for an office — stay
+    // silent (we don't know which office/quota to charge this to).
+    return c.json({})
+  }
+
+  const customerId = existingGroup.customer_id as number
+  const customer = await DB.prepare('SELECT * FROM customers WHERE id = ?').bind(customerId).first<any>()
+  const lang = customer?.reply_language || 'ar'
+
+  const T = lang === 'en'
+    ? {
+        suspended: '⚠️ This service is currently suspended. Please contact the account owner.',
+        limitReached: '⚠️ Monthly operation limit reached for this subscription. Please contact the account owner to upgrade.',
+        unclear: (reason: string) => `⚠️ Image is not clear enough: ${reason || 'please resend a clearer photo of the passport.'}`,
+        notPassport: '⚠️ This does not appear to be a passport page. Please send a clear photo of the passport data page.',
+        error: '❌ An error occurred while processing the image. Please try again.',
+        result: (r: any) => buildResultMessage(r, 'en', null)
+      }
+    : {
+        suspended: '⚠️ الخدمة موقوفة حالياً على هذا المكتب، يرجى التواصل مع صاحب الحساب.',
+        limitReached: '⚠️ تم الوصول للحد الأقصى من العمليات الشهرية المسموح بها في الاشتراك الحالي. يرجى التواصل مع صاحب الحساب للترقية.',
+        unclear: (reason: string) => `⚠️ الصورة غير واضحة بشكل كافٍ: ${reason || 'يرجى إرسال صورة أوضح للجواز.'}`,
+        notPassport: '⚠️ يبدو أن هذه الصورة ليست صفحة جواز سفر. يرجى إرسال صورة واضحة لصفحة بيانات الجواز.',
+        error: '❌ حدث خطأ أثناء معالجة الصورة، يرجى المحاولة مرة أخرى.',
+        result: (r: any) => buildResultMessage(r, 'ar', null)
+      }
+
+  if (customer?.status !== 'active') {
+    return c.json({ reply: T.suspended })
+  }
+
+  const activeSub = await DB.prepare(
+    `SELECT * FROM subscriptions WHERE customer_id = ? AND status='active' AND end_date >= datetime('now') ORDER BY end_date DESC LIMIT 1`
+  ).bind(customerId).first<any>()
+
+  if (!activeSub) {
+    return c.json({ reply: T.suspended })
+  }
+  if (activeSub.operations_used >= activeSub.operations_limit) {
+    return c.json({ reply: T.limitReached })
+  }
+
+  if (!image_base64) {
+    return c.json({ reply: T.error })
+  }
+
+  const opInsert = await DB.prepare(
+    `INSERT INTO operations (customer_id, sender_phone, group_jid, status, source)
+     VALUES (?, ?, ?, 'processing', 'whatsapp_group')`
+  ).bind(customerId, sender_jid, group_jid).run()
+  const operationId = opInsert.meta.last_row_id
+
+  try {
+    if (!GEMINI_API_KEY) {
+      throw new Error('GEMINI_API_KEY غير مهيأ على المنصة')
+    }
+
+    const extraction = await extractPassportData(GEMINI_API_KEY, image_base64, mime_type || 'image/jpeg')
+    const processingTime = Date.now() - startTime
+
+    if (!extraction.is_passport) {
+      await DB.prepare(
+        `UPDATE operations SET status='failed', error_message=?, extracted_json=?, processing_time_ms=? WHERE id=?`
+      ).bind('الصورة ليست جواز سفر', JSON.stringify(extraction), processingTime, operationId).run()
+      return c.json({ reply: T.notPassport })
+    }
+
+    if (!extraction.is_clear) {
+      await DB.prepare(
+        `UPDATE operations SET status='unclear', error_message=?, extracted_json=?, processing_time_ms=? WHERE id=?`
+      ).bind(extraction.clarity_reason || 'الصورة غير واضحة', JSON.stringify(extraction), processingTime, operationId).run()
+      return c.json({ reply: T.unclear(extraction.clarity_reason || '') })
+    }
+
+    await DB.batch([
+      DB.prepare(
+        `UPDATE operations SET status='success', full_name_ar=?, full_name_en=?, passport_number=?,
+           nationality=?, date_of_birth=?, date_of_expiry=?, gender=?, extracted_json=?, processing_time_ms=? WHERE id=?`
+      ).bind(
+        extraction.full_name_ar || null,
+        extraction.full_name_en || null,
+        extraction.passport_number || null,
+        extraction.nationality || null,
+        extraction.date_of_birth || null,
+        extraction.date_of_expiry || null,
+        extraction.gender || null,
+        JSON.stringify(extraction),
+        processingTime,
+        operationId
+      ),
+      DB.prepare('UPDATE subscriptions SET operations_used = operations_used + 1 WHERE id = ?').bind(activeSub.id)
+    ])
+
+    return c.json({ reply: T.result(extraction) })
+  } catch (err: any) {
+    console.error('Group passport processing error', err)
+    await DB.prepare(`UPDATE operations SET status='failed', error_message=? WHERE id=?`)
+      .bind(String(err?.message || err), operationId)
+      .run()
+    return c.json({ reply: T.error })
+  }
+})
+
 export default webhook
