@@ -24,4 +24,6 @@
   //   JWT_SECRET            -> random long string for signing session tokens
   //   WHATSAPP_VERIFY_TOKEN -> token you choose, must match Meta App webhook config
   //   WHATSAPP_API_VERSION  -> e.g. v21.0 (optional, defaults to v21.0)
+  //   BRIDGE_SECRET         -> shared secret for the Baileys WhatsApp-group bridge (VPS)
+  //   VISA_CHECKER_SECRET   -> shared secret for the VPS periodic Umrah-visa checker
 }
