@@ -1,12 +1,26 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import type { WhatsAppWebhookBody } from '../lib/whatsapp'
-import { downloadMedia, sendTextMessage, markMessageRead } from '../lib/whatsapp'
+import { downloadMedia, sendTextMessage, sendDocumentMessage, uploadMedia, markMessageRead } from '../lib/whatsapp'
 import { extractPassportData } from '../lib/gemini'
 import { AVAILABLE_FIELDS, parseExtractionFields } from '../lib/fields'
 import { extractOfficeActivationCode, matchOfficeByName, matchByCustomCommand } from '../lib/office'
+import { buildConversationKey } from '../lib/commands'
+import { handleTextCommand } from '../lib/commandHandlers'
+import { appendToCumulativeList, buildCumulativeListMessage, parseCumulativeFields } from '../lib/cumulative'
+import { getSetting, UNACTIVATED_WELCOME_KEY } from '../lib/settings'
 
 const SHARED_SESSION_DAYS = 30
+
+// Hardcoded fallback used only if the admin has never set a global welcome
+// message (settings.unactivated_welcome_message). The admin dashboard lets
+// this be fully customized (e.g. "for activation contact ...").
+const DEFAULT_WELCOME_MESSAGE = '👋 أهلاً وسهلاً! لتفعيل الخدمة يرجى التواصل مع إدارة المنصة.'
+
+// Umrah visa auto-check timing (feature 4): first check 3 hours after the
+// passport photo is received, then retry every 20 minutes until found.
+const VISA_CHECK_INITIAL_DELAY_MIN = 180
+const VISA_CHECK_RETRY_INTERVAL_MIN = 20
 
 const webhook = new Hono<AppEnv>()
 
@@ -192,13 +206,13 @@ async function handleIncomingMessage(params: {
       return
     }
 
-    // ---- 3) Not an activation/deactivation message: use existing session ----
+    // ---- 3) Not an activation/deactivation message and no session yet:
+    // send the unified, admin-editable welcome/activation-prompt message
+    // (feature 1) instead of the old hardcoded instructions. Private chats
+    // only — groups keep their existing silent behavior unchanged.
     if (!existingSession) {
-      await sendTextMessage(
-        phoneNumberId, accessToken, senderPhone,
-        '👋 مرحباً! أرسل اسم مكتبك متبوعاً بكلمة "تفعيل" أو أمر التفعيل الخاص بالمكتب لربط رقمك، مثال: معالم الرياض 11 تفعيل',
-        WHATSAPP_API_VERSION
-      ).catch(() => {})
+      const welcomeMsg = (await getSetting(DB, UNACTIVATED_WELCOME_KEY)) || DEFAULT_WELCOME_MESSAGE
+      await sendTextMessage(phoneNumberId, accessToken, senderPhone, welcomeMsg, WHATSAPP_API_VERSION).catch(() => {})
       return
     }
 
@@ -238,8 +252,34 @@ async function handleIncomingMessage(params: {
         result: (r: any) => buildResultMessage(r, 'ar', numberRow.extraction_fields)
       }
 
-  // Non-image messages -> friendly guidance
+  const conversationKey = buildConversationKey({ whatsapp_number_id: numberRow.id, sender_phone: senderPhone })
+
+  // Non-image messages: first try explicit commands (check-now, list,
+  // report, suggestion) — these work identically whether the number is
+  // private/dedicated or shared. Anything else falls back to the existing
+  // per-customer welcome_message / notImage guidance (unchanged).
   if (msg.type !== 'image') {
+    if (msg.type === 'text' && msg.text?.body) {
+      const outcome = await handleTextCommand(DB, customer, customerId, conversationKey, lang, msg.text.body).catch((err) => {
+        console.error('handleTextCommand failed', err)
+        return null
+      })
+      if (outcome) {
+        if (outcome.kind === 'text') {
+          await sendTextMessage(phoneNumberId, accessToken, senderPhone, outcome.text, WHATSAPP_API_VERSION).catch(() => {})
+        } else {
+          await DB.prepare(
+            `INSERT INTO render_jobs (customer_id, conversation_key, job_type, html, filename) VALUES (?, ?, 'report_pdf', ?, ?)`
+          ).bind(customerId, conversationKey, outcome.html, outcome.filename).run()
+          await sendTextMessage(
+            phoneNumberId, accessToken, senderPhone,
+            lang === 'en' ? '📄 Preparing your PDF report, it will arrive here shortly...' : '📄 يتم تجهيز ملف التقرير الآن، سيصلك هنا قريباً...',
+            WHATSAPP_API_VERSION
+          ).catch(() => {})
+        }
+        return
+      }
+    }
     await sendTextMessage(phoneNumberId, accessToken, senderPhone, customer?.welcome_message || T.notImage, WHATSAPP_API_VERSION).catch(() => {})
     return
   }
@@ -346,6 +386,38 @@ async function handleIncomingMessage(params: {
     await sendTextMessage(phoneNumberId, accessToken, senderPhone, T.result(extraction), WHATSAPP_API_VERSION).catch((err) =>
       console.error('sendTextMessage (result) failed', err)
     )
+
+    // Cumulative running list (feature 2): append this extraction and
+    // resend the updated numbered list, best-effort (must not affect the
+    // already-successful main extraction outcome above).
+    try {
+      const fieldKeys = parseCumulativeFields(customer?.cumulative_list_fields)
+      const resetHours = customer?.cumulative_list_reset_hours ?? 24
+      const items = await appendToCumulativeList(DB, customerId, conversationKey, resetHours, fieldKeys, extraction)
+      await sendTextMessage(
+        phoneNumberId, accessToken, senderPhone,
+        buildCumulativeListMessage(items, lang, fieldKeys),
+        WHATSAPP_API_VERSION
+      ).catch(() => {})
+    } catch (err) {
+      console.error('Cumulative list update failed', err)
+    }
+
+    // Periodic Umrah visa auto-check (feature 4): second, parallel service
+    // option alongside the extraction reply above. Only starts if we have
+    // both a passport number and a first name to search MOFA with.
+    if (extraction.passport_number && extraction.full_name_ar) {
+      try {
+        const firstName = extraction.full_name_ar.trim().split(/\s+/)[0]
+        const nextCheckAt = new Date(Date.now() + VISA_CHECK_INITIAL_DELAY_MIN * 60 * 1000).toISOString()
+        await DB.prepare(
+          `INSERT INTO umrah_visa_checks (operation_id, customer_id, conversation_key, passport_number, first_name, nationality, next_check_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        ).bind(operationId, customerId, conversationKey, extraction.passport_number, firstName, extraction.nationality || null, nextCheckAt).run()
+      } catch (err) {
+        console.error('Umrah visa check scheduling failed', err)
+      }
+    }
   } catch (err: any) {
     console.error('Passport processing error', err)
     await DB.prepare(`UPDATE operations SET status='failed', error_message=? WHERE id=?`)
@@ -589,7 +661,38 @@ webhook.post('/bridge/message', async (c) => {
       DB.prepare('UPDATE subscriptions SET operations_used = operations_used + 1 WHERE id = ?').bind(activeSub.id)
     ])
 
-    return c.json({ reply: T.result(extraction) })
+    let reply = T.result(extraction)
+
+    // Cumulative running list (feature 2) + periodic Umrah visa auto-check
+    // (feature 4): same behavior as the private/shared-number path, but this
+    // handler only returns a single `reply` string per incoming message (the
+    // Baileys bridge relays exactly one reply), so the cumulative-list
+    // message is appended to the same reply instead of being sent separately.
+    const conversationKey = buildConversationKey({ group_jid })
+
+    try {
+      const fieldKeys = parseCumulativeFields(customer?.cumulative_list_fields)
+      const resetHours = customer?.cumulative_list_reset_hours ?? 24
+      const items = await appendToCumulativeList(DB, customerId, conversationKey, resetHours, fieldKeys, extraction)
+      reply += '\n\n' + buildCumulativeListMessage(items, lang, fieldKeys)
+    } catch (err) {
+      console.error('Cumulative list update failed (group)', err)
+    }
+
+    if (extraction.passport_number && extraction.full_name_ar) {
+      try {
+        const firstName = extraction.full_name_ar.trim().split(/\s+/)[0]
+        const nextCheckAt = new Date(Date.now() + VISA_CHECK_INITIAL_DELAY_MIN * 60 * 1000).toISOString()
+        await DB.prepare(
+          `INSERT INTO umrah_visa_checks (operation_id, customer_id, conversation_key, passport_number, first_name, nationality, next_check_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        ).bind(operationId, customerId, conversationKey, extraction.passport_number, firstName, extraction.nationality || null, nextCheckAt).run()
+      } catch (err) {
+        console.error('Umrah visa check scheduling failed (group)', err)
+      }
+    }
+
+    return c.json({ reply })
   } catch (err: any) {
     console.error('Group passport processing error', err)
     await DB.prepare(`UPDATE operations SET status='failed', error_message=? WHERE id=?`)

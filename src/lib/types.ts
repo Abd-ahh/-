@@ -12,6 +12,12 @@ export type Bindings = {
   // Meta's official Cloud API cannot join/receive messages from groups).
   // The bridge sends it in the X-Bridge-Secret header on every request.
   BRIDGE_SECRET?: string
+  // Shared secret for the Umrah-visa periodic checker process (Playwright +
+  // Gemini Vision, running on the same VPS as the group bridge). It polls
+  // GET /webhook/visa-checks/pending and posts results to
+  // POST /webhook/visa-checks/:id/result. Separate secret from BRIDGE_SECRET
+  // so either integration can be rotated independently.
+  VISA_CHECKER_SECRET?: string
 }
 
 export type Variables = {
@@ -47,7 +53,51 @@ export interface CustomerRow {
   // replace the auto-derived "<office name> تفعيل" matching for this office.
   activation_code: string | null
   deactivation_code: string | null
+  // Cumulative running list of extracted fields per conversation (feature 2).
+  cumulative_list_fields: string | null // JSON array of field keys, null = default [full_name_ar, passport_number]
+  cumulative_list_reset_hours: number
   created_at: string
+}
+
+// ---------------------- Cumulative running list (per conversation) ----------------------
+export interface CumulativeListRow {
+  id: number
+  customer_id: number
+  conversation_key: string // 'wn:<whatsapp_number_id>:<sender_phone>' | 'grp:<group_jid>'
+  items_json: string // JSON array of { [fieldKey]: value } snapshots, oldest first
+  started_at: string
+  updated_at: string
+}
+
+// ---------------------- Suggestion box ----------------------
+export interface SuggestionRow {
+  id: number
+  customer_id: number | null
+  type: string // 'feature_suggestion' by default; kept generic for future office-submitted content types
+  message: string
+  conversation_key: string | null
+  status: 'new' | 'reviewed' | 'done'
+  created_at: string
+}
+
+// ---------------------- Umrah visa periodic check ----------------------
+export interface UmrahVisaCheckRow {
+  id: number
+  operation_id: number | null
+  customer_id: number
+  conversation_key: string
+  passport_number: string
+  first_name: string
+  nationality: string | null
+  status: 'pending' | 'checking' | 'found' | 'failed' | 'cancelled'
+  check_count: number
+  next_check_at: string
+  last_checked_at: string | null
+  last_error: string | null
+  found_at: string | null
+  pdf_r2_key: string | null
+  created_at: string
+  updated_at: string
 }
 
 export interface SubscriptionRow {
@@ -122,6 +172,19 @@ export interface OperationRow {
   processing_time_ms: number | null
   source: string
   created_at: string
+}
+
+export interface RenderJobRow {
+  id: number
+  customer_id: number
+  conversation_key: string
+  job_type: string
+  html: string
+  filename: string
+  status: 'pending' | 'done' | 'failed'
+  error: string | null
+  created_at: string
+  updated_at: string
 }
 
 export interface PassportExtractionResult {

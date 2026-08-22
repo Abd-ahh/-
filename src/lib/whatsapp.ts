@@ -33,6 +33,72 @@ export async function sendTextMessage(
   }
 }
 
+// Sends a document (e.g. the Umrah visa PDF, or a PDF-format report) via the
+// official Cloud API. WhatsApp requires either a previously-uploaded media id
+// or a publicly reachable URL — since Cloudflare Workers has no R2/public file
+// serving configured for this yet, callers pass a `link` (e.g. a temporary
+// signed URL, or a data: URL is NOT supported by WhatsApp) OR a `mediaId`
+// obtained via uploadMedia() below.
+export async function sendDocumentMessage(
+  phoneNumberId: string,
+  accessToken: string,
+  to: string,
+  document: { link?: string; mediaId?: string; filename?: string; caption?: string },
+  apiVersion?: string
+): Promise<void> {
+  const url = `${graphBase(apiVersion)}/${phoneNumberId}/messages`
+  const documentPayload: any = {}
+  if (document.mediaId) documentPayload.id = document.mediaId
+  else if (document.link) documentPayload.link = document.link
+  else throw new Error('sendDocumentMessage requires either link or mediaId')
+  if (document.filename) documentPayload.filename = document.filename
+  if (document.caption) documentPayload.caption = document.caption
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      to,
+      type: 'document',
+      document: documentPayload
+    })
+  })
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => '')
+    throw new Error(`WhatsApp send document failed (${resp.status}): ${err}`)
+  }
+}
+
+// Uploads binary media (e.g. a PDF) to Meta so it can be sent by mediaId via
+// sendDocumentMessage without needing a public URL. Meta requires multipart/
+// form-data; Cloudflare Workers' fetch supports FormData + Blob natively.
+export async function uploadMedia(
+  phoneNumberId: string,
+  accessToken: string,
+  bytes: ArrayBuffer,
+  mimeType: string,
+  apiVersion?: string
+): Promise<string> {
+  const url = `${graphBase(apiVersion)}/${phoneNumberId}/media`
+  const form = new FormData()
+  form.append('messaging_product', 'whatsapp')
+  form.append('file', new Blob([bytes], { type: mimeType }), 'document.pdf')
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}` },
+    body: form
+  })
+  const json: any = await resp.json().catch(() => ({}))
+  if (!resp.ok) {
+    throw new Error(`WhatsApp media upload failed (${resp.status}): ${json?.error?.message || ''}`)
+  }
+  return json.id as string
+}
+
 export async function markMessageRead(
   phoneNumberId: string,
   accessToken: string,
