@@ -9,6 +9,7 @@ import { buildConversationKey } from '../lib/commands'
 import { handleTextCommand } from '../lib/commandHandlers'
 import { appendToCumulativeList, buildCumulativeListMessage, parseCumulativeFields } from '../lib/cumulative'
 import { getSetting, UNACTIVATED_WELCOME_KEY } from '../lib/settings'
+import { deliverToConversation } from '../lib/deliver'
 
 const SHARED_SESSION_DAYS = 30
 
@@ -700,6 +701,250 @@ webhook.post('/bridge/message', async (c) => {
       .run()
     return c.json({ reply: T.error })
   }
+})
+
+// =====================================================================
+// Umrah visa periodic checker API (feature 4) — consumed by the separate
+// VPS process (Playwright + Gemini Vision for the captcha), which polls
+// for pending checks and reports results back. Secured with
+// VISA_CHECKER_SECRET (independent from BRIDGE_SECRET so either
+// integration can be rotated on its own).
+// =====================================================================
+
+function requireVisaCheckerAuth(c: any): Response | null {
+  const { VISA_CHECKER_SECRET } = c.env
+  if (!VISA_CHECKER_SECRET || c.req.header('x-visa-checker-secret') !== VISA_CHECKER_SECRET) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  return null
+}
+
+// GET /webhook/visa-checks/pending
+// Returns checks whose next_check_at has passed, and atomically marks them
+// 'checking' (so a slow VPS run + an overlapping poll don't double-process
+// the same check). limit caps how many the VPS pulls per poll cycle.
+webhook.get('/visa-checks/pending', async (c) => {
+  const authErr = requireVisaCheckerAuth(c)
+  if (authErr) return authErr
+  const { DB } = c.env
+  const limit = Math.min(parseInt(c.req.query('limit') || '10', 10) || 10, 50)
+
+  const due = await DB.prepare(
+    `SELECT * FROM umrah_visa_checks WHERE status = 'pending' AND next_check_at <= datetime('now') ORDER BY next_check_at ASC LIMIT ?`
+  ).bind(limit).all<any>()
+  const rows = due.results || []
+  if (rows.length === 0) return c.json({ checks: [] })
+
+  const ids = rows.map((r) => r.id)
+  await DB.batch(
+    ids.map((id) => DB.prepare(
+      `UPDATE umrah_visa_checks SET status='checking', check_count = check_count + 1, last_checked_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
+    ).bind(id))
+  )
+
+  return c.json({
+    checks: rows.map((r) => ({
+      id: r.id,
+      passport_number: r.passport_number,
+      first_name: r.first_name,
+      nationality: r.nationality,
+      check_count: r.check_count + 1
+    }))
+  })
+})
+
+// POST /webhook/visa-checks/:id/result
+// Body: { status: 'found', pdf_base64, pdf_mime_type? } to deliver the PDF
+// and mark done, OR { status: 'not_ready' } to reschedule +20 minutes, OR
+// { status: 'failed', error } to record an error and reschedule +20 minutes
+// (the checker keeps retrying automatically; there is no terminal failure
+// state here by design — MOFA/network hiccups should not silently stop
+// retries. An admin/customer can still be added later if a hard stop is
+// ever needed).
+webhook.post('/visa-checks/:id/result', async (c) => {
+  const authErr = requireVisaCheckerAuth(c)
+  if (authErr) return authErr
+  const { DB, WHATSAPP_API_VERSION } = c.env
+  const id = parseInt(c.req.param('id'), 10)
+  if (!id) return c.json({ error: 'invalid id' }, 400)
+
+  const check = await DB.prepare('SELECT * FROM umrah_visa_checks WHERE id = ?').bind(id).first<any>()
+  if (!check) return c.json({ error: 'not found' }, 404)
+
+  let body: { status?: string; pdf_base64?: string; pdf_mime_type?: string; error?: string }
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+
+  if (body.status === 'found') {
+    if (!body.pdf_base64) return c.json({ error: 'pdf_base64 is required when status=found' }, 400)
+
+    const deliverResult = await deliverToConversation(
+      DB,
+      check.conversation_key,
+      {
+        kind: 'document',
+        base64: body.pdf_base64,
+        mimeType: body.pdf_mime_type || 'application/pdf',
+        filename: `تأشيرة-عمرة-${check.passport_number}.pdf`,
+        caption: `✅ تأشيرة العمرة الخاصة بـ ${check.first_name} (${check.passport_number}) جاهزة.`
+      },
+      WHATSAPP_API_VERSION
+    )
+
+    await DB.prepare(
+      `UPDATE umrah_visa_checks SET status='found', found_at=datetime('now'), last_error=?, updated_at=datetime('now') WHERE id=?`
+    ).bind(deliverResult.ok ? null : `delivery failed: ${deliverResult.error}`, id).run()
+
+    return c.json({ ok: true, delivered: deliverResult.ok })
+  }
+
+  if (body.status === 'not_ready' || body.status === 'failed') {
+    const nextCheckAt = new Date(Date.now() + VISA_CHECK_RETRY_INTERVAL_MIN * 60 * 1000).toISOString()
+    await DB.prepare(
+      `UPDATE umrah_visa_checks SET status='pending', next_check_at=?, last_error=?, updated_at=datetime('now') WHERE id=?`
+    ).bind(nextCheckAt, body.status === 'failed' ? (body.error || 'unknown error') : null, id).run()
+    return c.json({ ok: true, next_check_at: nextCheckAt })
+  }
+
+  return c.json({ error: `unrecognized status: ${body.status}` }, 400)
+})
+
+// =====================================================================
+// Render jobs API (feature 5, PDF-format reports) — same VPS process
+// (already running Playwright for the visa checker) renders the HTML to
+// PDF via page.pdf() and delivers it to the originating conversation.
+// =====================================================================
+
+webhook.get('/render-jobs/pending', async (c) => {
+  const authErr = requireVisaCheckerAuth(c)
+  if (authErr) return authErr
+  const { DB } = c.env
+  const limit = Math.min(parseInt(c.req.query('limit') || '5', 10) || 5, 20)
+
+  const due = await DB.prepare(
+    `SELECT * FROM render_jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?`
+  ).bind(limit).all<any>()
+  const rows = due.results || []
+  if (rows.length === 0) return c.json({ jobs: [] })
+
+  const ids = rows.map((r) => r.id)
+  await DB.batch(
+    ids.map((id) => DB.prepare(`UPDATE render_jobs SET status='rendering', updated_at=datetime('now') WHERE id = ?`).bind(id))
+  )
+
+  return c.json({
+    jobs: rows.map((r) => ({ id: r.id, html: r.html, filename: r.filename }))
+  })
+})
+
+// POST /webhook/render-jobs/:id/result
+// Body: { status: 'done', pdf_base64 } or { status: 'failed', error }
+webhook.post('/render-jobs/:id/result', async (c) => {
+  const authErr = requireVisaCheckerAuth(c)
+  if (authErr) return authErr
+  const { DB, WHATSAPP_API_VERSION } = c.env
+  const id = parseInt(c.req.param('id'), 10)
+  if (!id) return c.json({ error: 'invalid id' }, 400)
+
+  const job = await DB.prepare('SELECT * FROM render_jobs WHERE id = ?').bind(id).first<any>()
+  if (!job) return c.json({ error: 'not found' }, 404)
+
+  let body: { status?: string; pdf_base64?: string; error?: string }
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+
+  if (body.status === 'done') {
+    if (!body.pdf_base64) return c.json({ error: 'pdf_base64 is required when status=done' }, 400)
+
+    const deliverResult = await deliverToConversation(
+      DB,
+      job.conversation_key,
+      { kind: 'document', base64: body.pdf_base64, mimeType: 'application/pdf', filename: job.filename },
+      WHATSAPP_API_VERSION
+    )
+
+    await DB.prepare(
+      `UPDATE render_jobs SET status='done', error=?, updated_at=datetime('now') WHERE id=?`
+    ).bind(deliverResult.ok ? null : `delivery failed: ${deliverResult.error}`, id).run()
+
+    return c.json({ ok: true, delivered: deliverResult.ok })
+  }
+
+  if (body.status === 'failed') {
+    await DB.prepare(
+      `UPDATE render_jobs SET status='failed', error=?, updated_at=datetime('now') WHERE id=?`
+    ).bind(body.error || 'unknown error', id).run()
+    return c.json({ ok: true })
+  }
+
+  return c.json({ error: `unrecognized status: ${body.status}` }, 400)
+})
+
+// =====================================================================
+// Group outbox API — polled by the Baileys bridge process (same VPS) to
+// deliver asynchronous messages (visa PDFs, PDF reports) into groups,
+// since the official Cloud API has no way to push into a group and the
+// bridge only otherwise replies in direct response to an inbound message.
+// Reuses BRIDGE_SECRET (same trust boundary as /bridge/message).
+// =====================================================================
+
+webhook.get('/bridge/outbox', async (c) => {
+  const { DB, BRIDGE_SECRET } = c.env
+  if (!BRIDGE_SECRET || c.req.header('x-bridge-secret') !== BRIDGE_SECRET) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const limit = Math.min(parseInt(c.req.query('limit') || '10', 10) || 10, 50)
+
+  const pending = await DB.prepare(
+    `SELECT * FROM group_outbox WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?`
+  ).bind(limit).all<any>()
+
+  return c.json({
+    items: (pending.results || []).map((r: any) => ({
+      id: r.id,
+      group_jid: r.group_jid,
+      kind: r.kind,
+      text: r.text,
+      document_base64: r.document_base64,
+      document_mime_type: r.document_mime_type,
+      filename: r.filename
+    }))
+  })
+})
+
+// POST /webhook/bridge/outbox/:id/ack
+// Body: { status: 'delivered' } or { status: 'failed', error }
+webhook.post('/bridge/outbox/:id/ack', async (c) => {
+  const { DB, BRIDGE_SECRET } = c.env
+  if (!BRIDGE_SECRET || c.req.header('x-bridge-secret') !== BRIDGE_SECRET) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const id = parseInt(c.req.param('id'), 10)
+  if (!id) return c.json({ error: 'invalid id' }, 400)
+
+  let body: { status?: string; error?: string }
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+
+  if (body.status === 'delivered') {
+    await DB.prepare(
+      `UPDATE group_outbox SET status='delivered', delivered_at=datetime('now') WHERE id=?`
+    ).bind(id).run()
+  } else {
+    await DB.prepare(
+      `UPDATE group_outbox SET status='failed', error=? WHERE id=?`
+    ).bind(body.error || 'unknown error', id).run()
+  }
+  return c.json({ ok: true })
 })
 
 export default webhook
