@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { requireCustomer } from '../lib/middleware'
 import { AVAILABLE_FIELDS, normalizeExtractionFields } from '../lib/fields'
+import { normalizeCumulativeFields } from '../lib/cumulative'
 import type { AppEnv } from '../lib/types'
 
 const customer = new Hono<AppEnv>()
@@ -14,7 +15,7 @@ customer.get('/fields', (c) => {
 customer.get('/me', async (c) => {
   const { DB } = c.env
   const id = c.get('customer')!.id
-  const cust = await DB.prepare('SELECT id, name, email, phone, status, reply_language, welcome_message, activation_code, deactivation_code, created_at FROM customers WHERE id = ?').bind(id).first()
+  const cust = await DB.prepare('SELECT id, name, email, phone, status, reply_language, welcome_message, activation_code, deactivation_code, cumulative_list_fields, cumulative_list_reset_hours, created_at FROM customers WHERE id = ?').bind(id).first()
   return c.json({ customer: cust })
 })
 
@@ -126,7 +127,8 @@ customer.put('/numbers/:id/fields', async (c) => {
 customer.put('/settings', async (c) => {
   const { DB } = c.env
   const id = c.get('customer')!.id
-  const { reply_language, welcome_message, phone, activation_code, deactivation_code } = await c.req.json()
+  const body = await c.req.json()
+  const { reply_language, welcome_message, phone, activation_code, deactivation_code } = body
 
   const actCode = activation_code?.trim() || null
   const deactCode = deactivation_code?.trim() || null
@@ -140,9 +142,22 @@ customer.put('/settings', async (c) => {
     if (dup) return c.json({ error: 'أمر الإيقاف مستخدم بالفعل من مكتب آخر، الرجاء اختيار أمر مختلف' }, 400)
   }
 
-  await DB.prepare('UPDATE customers SET reply_language=?, welcome_message=?, phone=?, activation_code=?, deactivation_code=? WHERE id=?')
-    .bind(reply_language || 'ar', welcome_message || null, phone || null, actCode, deactCode, id)
-    .run()
+  // Feature 2 (cumulative running list) settings: which fields to include in
+  // the numbered list, and how often (in hours) it auto-resets. Both
+  // optional in the request body — existing values are read first so a
+  // caller that only sends the other settings-form fields doesn't reset them.
+  const existing = await DB.prepare('SELECT cumulative_list_fields, cumulative_list_reset_hours FROM customers WHERE id = ?').bind(id).first<any>()
+  const cumulativeFields = 'cumulative_list_fields' in body
+    ? normalizeCumulativeFields(body.cumulative_list_fields)
+    : existing?.cumulative_list_fields ?? null
+  let resetHours = 'cumulative_list_reset_hours' in body
+    ? parseInt(body.cumulative_list_reset_hours, 10)
+    : existing?.cumulative_list_reset_hours ?? 24
+  if (!Number.isFinite(resetHours) || resetHours <= 0) resetHours = 24
+
+  await DB.prepare(
+    'UPDATE customers SET reply_language=?, welcome_message=?, phone=?, activation_code=?, deactivation_code=?, cumulative_list_fields=?, cumulative_list_reset_hours=? WHERE id=?'
+  ).bind(reply_language || 'ar', welcome_message || null, phone || null, actCode, deactCode, cumulativeFields, resetHours, id).run()
   return c.json({ success: true })
 })
 

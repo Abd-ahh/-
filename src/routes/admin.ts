@@ -4,6 +4,7 @@ import { hashPassword } from '../lib/auth'
 import { extractPassportData } from '../lib/gemini'
 import { AVAILABLE_FIELDS, normalizeExtractionFields } from '../lib/fields'
 import { fetchPhoneNumbersForWaba, findMatchingWabaNumber } from '../lib/whatsapp'
+import { getSetting, setSetting, UNACTIVATED_WELCOME_KEY } from '../lib/settings'
 import type { AppEnv } from '../lib/types'
 
 const admin = new Hono<AppEnv>()
@@ -567,6 +568,83 @@ admin.get('/operations', async (c) => {
   ).bind(limit, offset).all()
   const total = await DB.prepare('SELECT COUNT(*) as cnt FROM operations').first<{ cnt: number }>()
   return c.json({ operations: result.results, total: total?.cnt || 0, page, limit })
+})
+
+// ---------------------- Feature 1: unified welcome/activation message ----------------------
+// A single platform-wide setting (settings.unactivated_welcome_message) sent
+// to any non-activated sender in a private chat (dedicated or shared
+// number). Groups stay silent — see src/routes/webhook.ts's /bridge/message
+// handler, which never reads this setting.
+admin.get('/welcome-message', async (c) => {
+  const { DB } = c.env
+  const value = await getSetting(DB, UNACTIVATED_WELCOME_KEY)
+  return c.json({ message: value || '' })
+})
+
+admin.put('/welcome-message', async (c) => {
+  const { DB } = c.env
+  const { message } = await c.req.json()
+  if (typeof message !== 'string' || !message.trim()) {
+    return c.json({ error: 'نص الرسالة مطلوب' }, 400)
+  }
+  await setSetting(DB, UNACTIVATED_WELCOME_KEY, message.trim())
+  return c.json({ success: true })
+})
+
+// ---------------------- Feature 3: suggestion box ----------------------
+// Offices submit free-text suggestions via a WhatsApp command (see
+// src/lib/commandHandlers.ts); visible here to the admin. `type` keeps the
+// underlying table extensible for future similar "office-submitted content"
+// features without new migrations.
+admin.get('/suggestions', async (c) => {
+  const { DB } = c.env
+  const status = c.req.query('status') // optional filter: new | reviewed | done
+  const query = status
+    ? DB.prepare(
+        `SELECT s.*, cu.name as customer_name FROM suggestions s
+         LEFT JOIN customers cu ON cu.id = s.customer_id
+         WHERE s.status = ? ORDER BY s.created_at DESC`
+      ).bind(status)
+    : DB.prepare(
+        `SELECT s.*, cu.name as customer_name FROM suggestions s
+         LEFT JOIN customers cu ON cu.id = s.customer_id
+         ORDER BY s.created_at DESC`
+      )
+  const result = await query.all()
+  return c.json({ suggestions: result.results })
+})
+
+admin.put('/suggestions/:id', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const { status } = await c.req.json()
+  if (!['new', 'reviewed', 'done'].includes(status)) {
+    return c.json({ error: 'حالة غير صالحة' }, 400)
+  }
+  await DB.prepare('UPDATE suggestions SET status = ? WHERE id = ?').bind(status, id).run()
+  return c.json({ success: true })
+})
+
+// ---------------------- Feature 4: Umrah visa-check monitor ----------------------
+// Read-only visibility for the admin over the periodic checker's queue and
+// history (the VPS process itself polls/updates these rows via the
+// /webhook/visa-checks/* API, independent of this admin view).
+admin.get('/visa-checks', async (c) => {
+  const { DB } = c.env
+  const status = c.req.query('status') // optional filter: pending | checking | found | failed
+  const query = status
+    ? DB.prepare(
+        `SELECT v.*, cu.name as customer_name FROM umrah_visa_checks v
+         JOIN customers cu ON cu.id = v.customer_id
+         WHERE v.status = ? ORDER BY v.created_at DESC LIMIT 100`
+      ).bind(status)
+    : DB.prepare(
+        `SELECT v.*, cu.name as customer_name FROM umrah_visa_checks v
+         JOIN customers cu ON cu.id = v.customer_id
+         ORDER BY v.created_at DESC LIMIT 100`
+      )
+  const result = await query.all()
+  return c.json({ checks: result.results })
 })
 
 export default admin
