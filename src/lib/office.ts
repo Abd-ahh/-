@@ -72,8 +72,22 @@ export function matchOfficeByName(candidates: OfficeCandidate[], officeNameRaw: 
 // ---------------------- Custom activation/deactivation commands ----------------------
 // Each office may optionally set its own free-text activation/deactivation
 // command (instead of relying on the auto-derived "<name> تفعيل" pattern).
-// Matching is an exact comparison of the WHOLE incoming message (normalized)
-// against the stored command string.
+// Matching compares the WHOLE incoming message (normalized) against the
+// stored command string.
+//
+// Word-order-independent by design (bug fix 2026-08-23): a real office had
+// its command saved as "حجر تفعيل" but its members naturally typed
+// "تفعيل حجر" (activation-word-first, matching the auto-derived pattern's
+// convention) — an exact string comparison rejected it silently, and since
+// the office ALSO has a custom code, the name-based fallback never even
+// runs for it (custom code fully replaces name matching), so activation
+// was completely impossible for that phrasing. Comparing the *sorted* word
+// list instead of the raw string means either word order matches the same
+// stored code, without weakening the check for anything else (a genuinely
+// different phrase still won't share the same word multiset).
+function normalizeWordsForCompare(text: string): string {
+  return normalizeArabicText(text).split(' ').filter(Boolean).sort().join(' ')
+}
 
 export interface CustomCommandCandidate {
   id: number
@@ -84,10 +98,10 @@ export function matchByCustomCommand<T extends CustomCommandCandidate>(
   candidates: T[],
   incomingText: string
 ): T | null {
-  const target = normalizeArabicText(incomingText)
+  const target = normalizeWordsForCompare(incomingText)
   if (!target) return null
   const match = candidates.find((c) => {
-    const code = normalizeArabicText(c.code || '')
+    const code = normalizeWordsForCompare(c.code || '')
     return code.length > 0 && code === target
   })
   return match || null
