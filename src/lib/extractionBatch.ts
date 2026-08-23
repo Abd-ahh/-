@@ -30,7 +30,12 @@ export interface ExtractionBatchDeps {
 export interface ExtractionBatchItemResult {
   id: number
   outcome: 'success' | 'not_passport' | 'unclear' | 'failed'
-  message: string // ready-to-send text for this single item (already includes cumulative-list append if applicable)
+  // Ready-to-send text for this single item (already includes cumulative-list
+  // append if applicable). Empty string for 'not_passport' (2026-08-23, by
+  // explicit user request: stay silent instead of warning when an image
+  // isn't a passport page at all) — callers must skip empty messages rather
+  // than sending/joining them.
+  message: string
 }
 
 export interface ExtractionBatchResult {
@@ -63,13 +68,11 @@ export async function runExtractionBatch(
   const T = lang === 'en'
     ? {
         unclear: (reason: string) => `⚠️ Image is not clear enough: ${reason || 'please resend a clearer photo of the passport.'}`,
-        notPassport: '⚠️ This does not appear to be a passport page. Please send a clear photo of the passport data page.',
         error: '❌ An error occurred while processing this queued image. It will be retried on the next "استخراج".',
         limitReached: '⚠️ Monthly operation limit reached for this subscription. Remaining queued images were left for later.'
       }
     : {
         unclear: (reason: string) => `⚠️ الصورة غير واضحة بشكل كافٍ: ${reason || 'يرجى إرسال صورة أوضح للجواز.'}`,
-        notPassport: '⚠️ يبدو أن هذه الصورة ليست صفحة جواز سفر.',
         error: '❌ حدث خطأ أثناء معالجة إحدى الصور المنتظرة. ستتم إعادة المحاولة عند إرسال "استخراج" مرة أخرى.',
         limitReached: '⚠️ تم الوصول للحد الأقصى من العمليات الشهرية. الصور المتبقية بقيت بانتظار الاستخراج.'
       }
@@ -128,11 +131,14 @@ export async function runExtractionBatch(
       const extraction = await extractPassportData(GEMINI_API_KEY, base64, mimeType)
 
       if (!extraction.is_passport) {
+        // By explicit user request (2026-08-23): stay completely silent for
+        // this item — no warning text — while still removing it from the
+        // queue (so re-sending "استخراج" never reprocesses it).
         await DB.prepare(
           `UPDATE operations SET status='failed', image_key=?, error_message=?, extracted_json=? WHERE id=?`
         ).bind(imageKey, 'الصورة ليست جواز سفر', JSON.stringify(extraction), operationId).run()
         await DB.prepare(`DELETE FROM pending_extractions WHERE id = ?`).bind(row.id).run()
-        results.push({ id: row.id, outcome: 'not_passport', message: T.notPassport })
+        results.push({ id: row.id, outcome: 'not_passport', message: '' })
         continue
       }
 

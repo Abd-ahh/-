@@ -253,7 +253,8 @@ async function handleIncomingMessage(params: {
         suspended: '⚠️ This service is currently suspended. Please contact the account owner.',
         limitReached: '⚠️ Monthly operation limit reached for this subscription. Please contact the account owner to upgrade.',
         unclear: (reason: string) => `⚠️ Image is not clear enough: ${reason || 'please resend a clearer photo of the passport.'}`,
-        notPassport: '⚠️ This does not appear to be a passport page. Please send a clear photo of the passport data page.',
+        // notPassport intentionally removed (2026-08-23): the bot now stays
+        // silent instead of replying when the image isn't a passport page.
         error: '❌ An error occurred while processing the image. Please try again.',
         result: (r: any) => buildResultMessage(r, 'en', numberRow.extraction_fields)
       }
@@ -262,7 +263,8 @@ async function handleIncomingMessage(params: {
         suspended: '⚠️ الخدمة موقوفة حالياً على هذا الرقم، يرجى التواصل مع صاحب الحساب.',
         limitReached: '⚠️ تم الوصول للحد الأقصى من العمليات الشهرية المسموح بها في الاشتراك الحالي. يرجى التواصل مع صاحب الحساب للترقية.',
         unclear: (reason: string) => `⚠️ الصورة غير واضحة بشكل كافٍ: ${reason || 'يرجى إرسال صورة أوضح للجواز.'}`,
-        notPassport: '⚠️ يبدو أن هذه الصورة ليست صفحة جواز سفر. يرجى إرسال صورة واضحة لصفحة بيانات الجواز.',
+        // notPassport تمت إزالتها (2026-08-23): البوت أصبح يتجاهل الصورة بصمت
+        // بدلاً من الرد بتحذير عندما لا تكون صفحة جواز سفر.
         error: '❌ حدث خطأ أثناء معالجة الصورة، يرجى المحاولة مرة أخرى.',
         result: (r: any) => buildResultMessage(r, 'ar', numberRow.extraction_fields)
       }
@@ -311,6 +313,9 @@ async function handleIncomingMessage(params: {
 
           if (batchResult) {
             for (const item of batchResult.processed) {
+              // 'not_passport' items carry an empty message by design
+              // (2026-08-23: stay silent instead of warning) — skip sending.
+              if (!item.message) continue
               await sendTextMessage(phoneNumberId, accessToken, senderPhone, item.message, WHATSAPP_API_VERSION).catch(() => {})
             }
             if (batchResult.remainingQueued > 0) {
@@ -399,17 +404,13 @@ async function handleIncomingMessage(params: {
     const processingTime = Date.now() - startTime
 
     if (!extraction.is_passport) {
+      // By explicit user request (2026-08-23): stay completely silent when
+      // the image isn't a passport page at all (e.g. a forwarded document,
+      // screenshot, or unrelated photo) — no WhatsApp reply is sent. The
+      // outcome is still persisted for audit/reporting purposes.
       await DB.prepare(
         `UPDATE operations SET status='failed', image_key=?, error_message=?, extracted_json=?, processing_time_ms=? WHERE id=?`
       ).bind(imageKey, 'الصورة ليست جواز سفر', JSON.stringify(extraction), processingTime, operationId).run()
-      // Sending the WhatsApp reply is a best-effort side effect at this
-      // point — the extraction outcome is already persisted, so a network
-      // hiccup or a WhatsApp-side send failure (e.g. recipient not in the
-      // allowed list on a test number) must NOT propagate to the outer
-      // catch below and overwrite the already-correct operation status.
-      await sendTextMessage(phoneNumberId, accessToken, senderPhone, T.notPassport, WHATSAPP_API_VERSION).catch((err) =>
-        console.error('sendTextMessage (notPassport) failed', err)
-      )
       return
     }
 
@@ -651,7 +652,9 @@ webhook.post('/bridge/message', async (c) => {
           return c.json({ reply: groupLang === 'en' ? '❌ An error occurred while processing the queued images.' : '❌ حدث خطأ أثناء معالجة الصور المنتظرة.' })
         }
 
-        const parts = batchResult.processed.map((item) => item.message)
+        // 'not_passport' items carry an empty message by design (2026-08-23:
+        // stay silent instead of warning) — filter them out before joining.
+        const parts = batchResult.processed.map((item) => item.message).filter((m) => m.length > 0)
         if (batchResult.remainingQueued > 0) {
           parts.push(
             groupLang === 'en'
@@ -659,7 +662,10 @@ webhook.post('/bridge/message', async (c) => {
               : `ℹ️ لا تزال هناك ${batchResult.remainingQueued} صورة بانتظار الاستخراج. أرسل "استخراج" مرة أخرى للمتابعة.`
           )
         }
-        return c.json({ reply: parts.join('\n\n') })
+        // If every queued item was 'not_passport' (now silent) and nothing
+        // remains queued, parts can end up empty — return no reply at all
+        // rather than an empty string.
+        return parts.length > 0 ? c.json({ reply: parts.join('\n\n') }) : c.json({})
       }
     }
 
@@ -682,7 +688,8 @@ webhook.post('/bridge/message', async (c) => {
         suspended: '⚠️ This service is currently suspended. Please contact the account owner.',
         limitReached: '⚠️ Monthly operation limit reached for this subscription. Please contact the account owner to upgrade.',
         unclear: (reason: string) => `⚠️ Image is not clear enough: ${reason || 'please resend a clearer photo of the passport.'}`,
-        notPassport: '⚠️ This does not appear to be a passport page. Please send a clear photo of the passport data page.',
+        // notPassport intentionally removed (2026-08-23): the bot now stays
+        // silent instead of replying when the image isn't a passport page.
         error: '❌ An error occurred while processing the image. Please try again.',
         result: (r: any) => buildResultMessage(r, 'en', null)
       }
@@ -690,7 +697,8 @@ webhook.post('/bridge/message', async (c) => {
         suspended: '⚠️ الخدمة موقوفة حالياً على هذا المكتب، يرجى التواصل مع صاحب الحساب.',
         limitReached: '⚠️ تم الوصول للحد الأقصى من العمليات الشهرية المسموح بها في الاشتراك الحالي. يرجى التواصل مع صاحب الحساب للترقية.',
         unclear: (reason: string) => `⚠️ الصورة غير واضحة بشكل كافٍ: ${reason || 'يرجى إرسال صورة أوضح للجواز.'}`,
-        notPassport: '⚠️ يبدو أن هذه الصورة ليست صفحة جواز سفر. يرجى إرسال صورة واضحة لصفحة بيانات الجواز.',
+        // notPassport تمت إزالتها (2026-08-23): البوت أصبح يتجاهل الصورة بصمت
+        // بدلاً من الرد بتحذير عندما لا تكون صفحة جواز سفر.
         error: '❌ حدث خطأ أثناء معالجة الصورة، يرجى المحاولة مرة أخرى.',
         result: (r: any) => buildResultMessage(r, 'ar', null)
       }
@@ -738,10 +746,13 @@ webhook.post('/bridge/message', async (c) => {
     const processingTime = Date.now() - startTime
 
     if (!extraction.is_passport) {
+      // By explicit user request (2026-08-23): stay completely silent when
+      // the image isn't a passport page at all — no reply is sent to the
+      // group. The outcome is still persisted for audit/reporting purposes.
       await DB.prepare(
         `UPDATE operations SET status='failed', error_message=?, extracted_json=?, processing_time_ms=? WHERE id=?`
       ).bind('الصورة ليست جواز سفر', JSON.stringify(extraction), processingTime, operationId).run()
-      return c.json({ reply: T.notPassport })
+      return c.json({})
     }
 
     if (!extraction.is_clear) {
