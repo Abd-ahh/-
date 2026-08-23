@@ -11,6 +11,7 @@ import { getSetting, UNACTIVATED_WELCOME_KEY } from '../lib/settings'
 import { deliverToConversation } from '../lib/deliver'
 import { runExtractionBatch } from '../lib/extractionBatch'
 import { buildResultMessage } from '../lib/passportMessage'
+import { runDueMessageLists, applyMessageListAck } from '../lib/messageLists'
 
 const SHARED_SESSION_DAYS = 30
 
@@ -1062,16 +1063,47 @@ webhook.post('/bridge/outbox/:id/ack', async (c) => {
     return c.json({ error: 'invalid json' }, 400)
   }
 
+  // Look up send_log_id BEFORE updating, so we can propagate the result to
+  // message_list_send_log (Message Lists feature, 2026-08-23) — this is the
+  // ONLY change needed on the shared outbox/ack flow to support that
+  // feature's per-recipient sent/failed tracking, since the bridge already
+  // treats group_outbox.group_jid as an opaque destination JID regardless
+  // of whether it's a group or an individual number.
+  const outboxRow = await DB.prepare('SELECT send_log_id FROM group_outbox WHERE id = ?').bind(id).first<{ send_log_id: number | null }>()
+
   if (body.status === 'delivered') {
     await DB.prepare(
       `UPDATE group_outbox SET status='delivered', delivered_at=datetime('now') WHERE id=?`
     ).bind(id).run()
+    if (outboxRow?.send_log_id) {
+      await applyMessageListAck(DB, outboxRow.send_log_id, 'sent')
+    }
   } else {
     await DB.prepare(
       `UPDATE group_outbox SET status='failed', error=? WHERE id=?`
     ).bind(body.error || 'unknown error', id).run()
+    if (outboxRow?.send_log_id) {
+      await applyMessageListAck(DB, outboxRow.send_log_id, 'failed', body.error)
+    }
   }
   return c.json({ ok: true })
+})
+
+// =====================================================================
+// Message Lists (قوائم رسائل) — scheduled WhatsApp broadcast lists.
+// Cloudflare Pages has no native cron/scheduled-handler support, so this
+// endpoint is polled once/minute by the same VPS bridge process (see
+// bridge/bridge.js's pollMessageListTick), mirroring the exact pattern
+// already used for the Umrah visa periodic checker. Reuses BRIDGE_SECRET
+// (same trust boundary as every other /bridge/* endpoint).
+// =====================================================================
+webhook.get('/message-lists/tick', async (c) => {
+  const { DB, BRIDGE_SECRET } = c.env
+  if (!BRIDGE_SECRET || c.req.header('x-bridge-secret') !== BRIDGE_SECRET) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const result = await runDueMessageLists(DB)
+  return c.json({ ok: true, ...result })
 })
 
 export default webhook

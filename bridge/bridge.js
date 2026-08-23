@@ -18,7 +18,7 @@
 //                     e.g. 9665XXXXXXXX (no +, no spaces)
 // =========================================================
 
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } from '@whiskeysockets/baileys'
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, Browsers } from '@whiskeysockets/baileys'
 import pino from 'pino'
 import qrcodeTerminal from 'qrcode-terminal'
 import fs from 'fs'
@@ -58,6 +58,88 @@ async function forwardToWorker(payload) {
   }
 }
 
+// ---- Outbox poller (async group delivery) ----
+// The official Cloud API can't push into a group, and this bridge only
+// otherwise replies synchronously to an inbound message. For asynchronous
+// results (Umrah visa PDF ready hours later, PDF report ready), the Worker
+// queues into `group_outbox` and this poller delivers + acks them.
+const OUTBOX_POLL_INTERVAL_MS = parseInt(process.env.OUTBOX_POLL_INTERVAL_MS || '15000', 10)
+
+function base64ToBuffer(b64) {
+  return Buffer.from(b64, 'base64')
+}
+
+async function pollOutbox(sock) {
+  try {
+    const resp = await fetch(`${WORKER_URL}/webhook/bridge/outbox?limit=10`, {
+      headers: { 'X-Bridge-Secret': BRIDGE_SECRET }
+    })
+    if (!resp.ok) return
+    const data = await resp.json()
+    const items = data?.items || []
+
+    for (const item of items) {
+      try {
+        if (item.kind === 'document' && item.document_base64) {
+          await sock.sendMessage(item.group_jid, {
+            document: base64ToBuffer(item.document_base64),
+            mimetype: item.document_mime_type || 'application/pdf',
+            fileName: item.filename || 'document.pdf',
+            caption: item.text || undefined
+          })
+        } else if (item.text) {
+          await sock.sendMessage(item.group_jid, { text: item.text })
+        }
+
+        await fetch(`${WORKER_URL}/webhook/bridge/outbox/${item.id}/ack`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Bridge-Secret': BRIDGE_SECRET },
+          body: JSON.stringify({ status: 'delivered' })
+        })
+      } catch (err) {
+        logger.error({ err: err?.message, itemId: item.id }, 'Failed to deliver outbox item')
+        await fetch(`${WORKER_URL}/webhook/bridge/outbox/${item.id}/ack`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Bridge-Secret': BRIDGE_SECRET },
+          body: JSON.stringify({ status: 'failed', error: String(err?.message || err) })
+        }).catch(() => {})
+      }
+    }
+  } catch (err) {
+    logger.error({ err: err?.message }, 'Failed to poll outbox')
+  }
+}
+
+// ---- Message Lists tick (scheduled WhatsApp broadcast lists) ----
+// Cloudflare Pages has no native cron/scheduled-handler support, so the
+// Worker's src/lib/messageLists.ts logic (which lists are due right now)
+// is triggered from here instead — the same "external process polls a
+// Worker endpoint on a timer" pattern already used above for group_outbox
+// and, before this bridge existed, for the Umrah visa periodic checker.
+// The endpoint itself queues group_outbox rows for anything due, which the
+// existing pollOutbox() above then delivers on its own next tick — no
+// separate delivery code needed here since Baileys' sendMessage() already
+// accepts an individual-number JID exactly like a group JID.
+const MESSAGE_LIST_TICK_INTERVAL_MS = parseInt(process.env.MESSAGE_LIST_TICK_INTERVAL_MS || '60000', 10)
+
+async function tickMessageLists() {
+  try {
+    const resp = await fetch(`${WORKER_URL}/webhook/message-lists/tick`, {
+      headers: { 'X-Bridge-Secret': BRIDGE_SECRET }
+    })
+    if (!resp.ok) {
+      logger.error({ status: resp.status }, 'message-lists tick failed')
+      return
+    }
+    const data = await resp.json()
+    if (data?.lists_fired > 0) {
+      logger.info(data, 'message-lists tick fired lists')
+    }
+  } catch (err) {
+    logger.error({ err: err?.message }, 'Failed to reach message-lists tick endpoint')
+  }
+}
+
 async function startBridge() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
 
@@ -65,7 +147,7 @@ async function startBridge() {
     auth: state,
     logger,
     printQRInTerminal: false, // we handle QR display ourselves below
-    browser: ['Passport AI Bridge', 'Chrome', '1.0.0']
+    browser: Browsers.ubuntu('Chrome')
   })
 
   sock.ev.on('creds.update', saveCreds)
@@ -107,6 +189,11 @@ async function startBridge() {
     } else if (connection === 'open') {
       pairingRequested = false
       console.log('✅ Connected to WhatsApp successfully. Bridge is now listening for group messages.')
+      // Start the outbox poller once the socket is actually connected.
+      setInterval(() => pollOutbox(sock), OUTBOX_POLL_INTERVAL_MS)
+      // Start the message-lists scheduler tick (queues due lists into group_outbox,
+      // which the poller above then delivers on its own next cycle).
+      setInterval(tickMessageLists, MESSAGE_LIST_TICK_INTERVAL_MS)
     }
   })
 

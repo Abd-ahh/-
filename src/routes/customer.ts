@@ -3,6 +3,11 @@ import { requireCustomer } from '../lib/middleware'
 import { AVAILABLE_FIELDS, normalizeExtractionFields } from '../lib/fields'
 import { normalizeCumulativeFields, parseCumulativeFields, parseStoredTimestamp } from '../lib/cumulative'
 import { parseConversationKey } from '../lib/commands'
+import {
+  fireMessageList, listContacts, createContact, updateContact, deleteContact,
+  listMessageLists, getMessageListDetail, validateMessageListInput, createMessageList,
+  updateMessageList, deleteMessageList
+} from '../lib/messageLists'
 import type { AppEnv } from '../lib/types'
 
 const customer = new Hono<AppEnv>()
@@ -227,6 +232,105 @@ customer.get('/operations', async (c) => {
   ).bind(id, limit, offset).all()
   const total = await DB.prepare('SELECT COUNT(*) as cnt FROM operations WHERE customer_id = ?').bind(id).first<{ cnt: number }>()
   return c.json({ operations: result.results, total: total?.cnt || 0, page, limit })
+})
+
+// ---------------------- Message Lists (قوائم رسائل) — office self-service ----------------------
+// Same underlying tables/helpers as the admin's platform-wide view
+// (src/routes/admin.ts), but every operation here is hard-scoped to the
+// logged-in office's own customer_id — an office can never see or touch
+// another office's contacts/lists through these endpoints.
+customer.get('/message-contacts', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const contacts = await listContacts(DB, id)
+  return c.json({ contacts })
+})
+
+customer.post('/message-contacts', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const body = await c.req.json()
+  if (!body.name || !body.value) return c.json({ error: 'الاسم والرقم/المعرّف مطلوبان' }, 400)
+  const contactId = await createContact(DB, id, body)
+  return c.json({ success: true, id: contactId })
+})
+
+customer.put('/message-contacts/:contactId', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const contactId = parseInt(c.req.param('contactId'), 10)
+  const body = await c.req.json()
+  const ok = await updateContact(DB, contactId, id, body)
+  if (!ok) return c.json({ error: 'جهة الاتصال غير موجودة أو لا تخص مكتبك' }, 404)
+  return c.json({ success: true })
+})
+
+customer.delete('/message-contacts/:contactId', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const contactId = parseInt(c.req.param('contactId'), 10)
+  const ok = await deleteContact(DB, contactId, id)
+  if (!ok) return c.json({ error: 'جهة الاتصال غير موجودة أو لا تخص مكتبك' }, 404)
+  return c.json({ success: true })
+})
+
+customer.get('/message-lists', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const lists = await listMessageLists(DB, id)
+  return c.json({ lists })
+})
+
+customer.get('/message-lists/:listId', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const listId = parseInt(c.req.param('listId'), 10)
+  const detail = await getMessageListDetail(DB, listId, id)
+  if (!detail) return c.json({ error: 'القائمة غير موجودة أو لا تخص مكتبك' }, 404)
+  return c.json(detail)
+})
+
+customer.post('/message-lists', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const body = await c.req.json()
+  const validationError = validateMessageListInput(body)
+  if (validationError) return c.json(validationError, 400)
+  const listId = await createMessageList(DB, id, body)
+  return c.json({ success: true, id: listId })
+})
+
+customer.put('/message-lists/:listId', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const listId = parseInt(c.req.param('listId'), 10)
+  const body = await c.req.json()
+  const validationError = validateMessageListInput(body)
+  if (validationError) return c.json(validationError, 400)
+  const ok = await updateMessageList(DB, listId, id, body)
+  if (!ok) return c.json({ error: 'القائمة غير موجودة أو لا تخص مكتبك' }, 404)
+  return c.json({ success: true })
+})
+
+customer.delete('/message-lists/:listId', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const listId = parseInt(c.req.param('listId'), 10)
+  const ok = await deleteMessageList(DB, listId, id)
+  if (!ok) return c.json({ error: 'القائمة غير موجودة أو لا تخص مكتبك' }, 404)
+  return c.json({ success: true })
+})
+
+// Manual immediate send, bypassing the schedule — useful to test a list
+// right after creating it instead of waiting for the next scheduled time.
+customer.post('/message-lists/:listId/send-now', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const listId = parseInt(c.req.param('listId'), 10)
+  const list = await DB.prepare('SELECT * FROM message_lists WHERE id = ? AND customer_id = ?').bind(listId, id).first<any>()
+  if (!list) return c.json({ error: 'القائمة غير موجودة أو لا تخص مكتبك' }, 404)
+  const result = await fireMessageList(DB, list)
+  return c.json({ success: true, ...result })
 })
 
 export default customer

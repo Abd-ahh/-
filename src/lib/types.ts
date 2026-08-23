@@ -200,3 +200,58 @@ export interface PassportExtractionResult {
   gender?: string
   confidence?: number
 }
+
+// ---------------------- Message Lists (قوائم رسائل, migration 0010) ----------------------
+// Scheduled WhatsApp marketing/broadcast lists. Delivery goes exclusively
+// through the unofficial Baileys bridge's group_outbox queue (see
+// src/lib/deliver.ts and src/lib/messageLists.ts) — never the official
+// Cloud API, which requires pre-approved templates for this kind of
+// unsolicited outbound message.
+export interface MessageContactRow {
+  id: number
+  customer_id: number
+  name: string
+  channel: 'number' | 'group'
+  value: string // channel='number': digits with country code; channel='group': raw group JID
+  region: string | null
+  created_at: string
+}
+
+export interface MessageListRow {
+  id: number
+  customer_id: number
+  name: string
+  message_type: string | null
+  message_text: string
+  schedule_time: string // 'HH:MM', Riyadh-local (UTC+3)
+  recurrence: 'daily' | 'weekly' | 'monthly'
+  schedule_days: string | null // JSON array — weekday numbers (weekly) or day-of-month numbers (monthly)
+  target_region: string | null
+  is_active: number
+  last_run_date: string | null // 'YYYY-MM-DD' Riyadh-local, last date this list fired
+  created_at: string
+  updated_at: string
+}
+
+export interface MessageListRunRow {
+  id: number
+  list_id: number
+  run_at: string
+  total_recipients: number
+  sent_count: number
+  failed_count: number
+  status: 'running' | 'done'
+}
+
+export interface MessageListSendLogRow {
+  id: number
+  run_id: number
+  list_id: number
+  contact_id: number | null
+  name_snapshot: string
+  jid_snapshot: string
+  status: 'queued' | 'sent' | 'failed'
+  error: string | null
+  created_at: string
+  updated_at: string
+}

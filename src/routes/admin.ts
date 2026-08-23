@@ -5,6 +5,11 @@ import { extractPassportData } from '../lib/gemini'
 import { AVAILABLE_FIELDS, normalizeExtractionFields } from '../lib/fields'
 import { fetchPhoneNumbersForWaba, findMatchingWabaNumber } from '../lib/whatsapp'
 import { getSetting, setSetting, UNACTIVATED_WELCOME_KEY } from '../lib/settings'
+import {
+  fireMessageList, listContacts, createContact, updateContact, deleteContact,
+  listMessageLists, getMessageListDetail, validateMessageListInput, createMessageList,
+  updateMessageList, deleteMessageList
+} from '../lib/messageLists'
 import type { AppEnv } from '../lib/types'
 
 const admin = new Hono<AppEnv>()
@@ -688,6 +693,122 @@ admin.get('/visa-checks', async (c) => {
       )
   const result = await query.all()
   return c.json({ checks: result.results })
+})
+
+// ---------------------- Message Lists (قوائم رسائل) — platform-wide admin view ----------------------
+// The admin can see/manage every office's contacts and lists (e.g. to set
+// up "معالم الرياض"'s pilot list on their behalf), scoped by customer_id
+// passed explicitly in the request (query param for reads, body for
+// writes) since the admin isn't tied to a single customer_id like the
+// customer portal is. See src/routes/customer.ts for the office's own
+// self-service equivalent of these same endpoints.
+admin.get('/message-contacts', async (c) => {
+  const { DB } = c.env
+  const customerId = parseInt(c.req.query('customer_id') || '', 10)
+  if (!customerId) return c.json({ error: 'customer_id مطلوب' }, 400)
+  const contacts = await listContacts(DB, customerId)
+  return c.json({ contacts })
+})
+
+admin.post('/message-contacts', async (c) => {
+  const { DB } = c.env
+  const body = await c.req.json()
+  const customerId = parseInt(body.customer_id, 10)
+  if (!customerId) return c.json({ error: 'customer_id مطلوب' }, 400)
+  if (!body.name || !body.value) return c.json({ error: 'الاسم والرقم/المعرّف مطلوبان' }, 400)
+  const id = await createContact(DB, customerId, body)
+  return c.json({ success: true, id })
+})
+
+admin.put('/message-contacts/:id', async (c) => {
+  const { DB } = c.env
+  const id = parseInt(c.req.param('id'), 10)
+  const body = await c.req.json()
+  const customerId = parseInt(body.customer_id, 10)
+  if (!customerId) return c.json({ error: 'customer_id مطلوب' }, 400)
+  const ok = await updateContact(DB, id, customerId, body)
+  if (!ok) return c.json({ error: 'جهة الاتصال غير موجودة' }, 404)
+  return c.json({ success: true })
+})
+
+admin.delete('/message-contacts/:id', async (c) => {
+  const { DB } = c.env
+  const id = parseInt(c.req.param('id'), 10)
+  const customerId = parseInt(c.req.query('customer_id') || '', 10)
+  if (!customerId) return c.json({ error: 'customer_id مطلوب' }, 400)
+  const ok = await deleteContact(DB, id, customerId)
+  if (!ok) return c.json({ error: 'جهة الاتصال غير موجودة' }, 404)
+  return c.json({ success: true })
+})
+
+admin.get('/message-lists', async (c) => {
+  const { DB } = c.env
+  const customerId = parseInt(c.req.query('customer_id') || '', 10)
+  if (customerId) {
+    const lists = await listMessageLists(DB, customerId)
+    return c.json({ lists })
+  }
+  // No filter: platform-wide view across every office, for the admin's
+  // overview table.
+  const rows = await DB.prepare(
+    `SELECT l.*, cu.name as customer_name,
+       (SELECT r2.run_at FROM message_list_runs r2 WHERE r2.list_id = l.id ORDER BY r2.run_at DESC LIMIT 1) as last_run_at
+     FROM message_lists l JOIN customers cu ON cu.id = l.customer_id
+     ORDER BY l.created_at DESC`
+  ).all()
+  return c.json({ lists: rows.results })
+})
+
+admin.get('/message-lists/:id', async (c) => {
+  const { DB } = c.env
+  const id = parseInt(c.req.param('id'), 10)
+  const row = await DB.prepare('SELECT customer_id FROM message_lists WHERE id = ?').bind(id).first<{ customer_id: number }>()
+  if (!row) return c.json({ error: 'القائمة غير موجودة' }, 404)
+  const detail = await getMessageListDetail(DB, id, row.customer_id)
+  return c.json(detail)
+})
+
+admin.post('/message-lists', async (c) => {
+  const { DB } = c.env
+  const body = await c.req.json()
+  const customerId = parseInt(body.customer_id, 10)
+  if (!customerId) return c.json({ error: 'customer_id مطلوب' }, 400)
+  const validationError = validateMessageListInput(body)
+  if (validationError) return c.json(validationError, 400)
+  const id = await createMessageList(DB, customerId, body)
+  return c.json({ success: true, id })
+})
+
+admin.put('/message-lists/:id', async (c) => {
+  const { DB } = c.env
+  const id = parseInt(c.req.param('id'), 10)
+  const body = await c.req.json()
+  const row = await DB.prepare('SELECT customer_id FROM message_lists WHERE id = ?').bind(id).first<{ customer_id: number }>()
+  if (!row) return c.json({ error: 'القائمة غير موجودة' }, 404)
+  const validationError = validateMessageListInput(body)
+  if (validationError) return c.json(validationError, 400)
+  await updateMessageList(DB, id, row.customer_id, body)
+  return c.json({ success: true })
+})
+
+admin.delete('/message-lists/:id', async (c) => {
+  const { DB } = c.env
+  const id = parseInt(c.req.param('id'), 10)
+  const row = await DB.prepare('SELECT customer_id FROM message_lists WHERE id = ?').bind(id).first<{ customer_id: number }>()
+  if (!row) return c.json({ error: 'القائمة غير موجودة' }, 404)
+  await deleteMessageList(DB, id, row.customer_id)
+  return c.json({ success: true })
+})
+
+// Manual immediate send, bypassing the schedule — useful for testing a list
+// right after creating it instead of waiting for the next scheduled time.
+admin.post('/message-lists/:id/send-now', async (c) => {
+  const { DB } = c.env
+  const id = parseInt(c.req.param('id'), 10)
+  const list = await DB.prepare('SELECT * FROM message_lists WHERE id = ?').bind(id).first<any>()
+  if (!list) return c.json({ error: 'القائمة غير موجودة' }, 404)
+  const result = await fireMessageList(DB, list)
+  return c.json({ success: true, ...result })
 })
 
 export default admin
