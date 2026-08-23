@@ -21,6 +21,40 @@ export async function handleTextCommand(
   const cmd = parseCommand(text)
   if (!cmd) return null
 
+  if (cmd.type === 'toggle_feature') {
+    const column = cmd.feature === 'cumulative_list' ? 'feature_cumulative_list_enabled' : 'feature_visa_check_enabled'
+    await DB.prepare(`UPDATE customers SET ${column} = ? WHERE id = ?`).bind(cmd.enabled ? 1 : 0, customerId).run()
+
+    const featureNameAr = cmd.feature === 'cumulative_list' ? 'القائمة التراكمية' : 'فحص التأشيرة'
+    const featureNameEn = cmd.feature === 'cumulative_list' ? 'the cumulative list' : 'the visa auto-check'
+    return {
+      kind: 'text',
+      text: cmd.enabled
+        ? (lang === 'en' ? `✅ ${featureNameEn} has been enabled for this conversation.` : `✅ تم تفعيل ${featureNameAr} لهذه المحادثة.`)
+        : (lang === 'en' ? `✅ ${featureNameEn} has been disabled for this conversation.` : `✅ تم إلغاء تفعيل ${featureNameAr} لهذه المحادثة.`)
+    }
+  }
+
+  // "list" and "check_now" only make sense once their respective feature is
+  // enabled via the matching activation command.
+  if (cmd.type === 'list' && !customer?.feature_cumulative_list_enabled) {
+    return {
+      kind: 'text',
+      text: lang === 'en'
+        ? '⚠️ The cumulative list feature is not enabled. Send "تفعيل القائمة" to enable it.'
+        : '⚠️ ميزة القائمة التراكمية غير مفعّلة. أرسل "تفعيل القائمة" لتفعيلها.'
+    }
+  }
+
+  if (cmd.type === 'check_now' && !customer?.feature_visa_check_enabled) {
+    return {
+      kind: 'text',
+      text: lang === 'en'
+        ? '⚠️ The visa auto-check feature is not enabled. Send "تفعيل فحص التاشيره" to enable it.'
+        : '⚠️ ميزة فحص التأشيرة غير مفعّلة. أرسل "تفعيل فحص التاشيره" لتفعيلها.'
+    }
+  }
+
   if (cmd.type === 'check_now') {
     const pending = await DB.prepare(
       `SELECT id FROM umrah_visa_checks WHERE customer_id = ? AND conversation_key = ? AND status IN ('pending','checking')`

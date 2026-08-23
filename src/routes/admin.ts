@@ -639,6 +639,7 @@ admin.get('/activation-commands', async (c) => {
   const { DB } = c.env
   const result = await DB.prepare(
     `SELECT DISTINCT cu.id, cu.name, cu.activation_code, cu.deactivation_code,
+       cu.feature_cumulative_list_enabled, cu.feature_visa_check_enabled,
        (SELECT COUNT(*) FROM shared_number_sessions sess
           WHERE sess.customer_id = cu.id AND sess.expires_at >= datetime('now')) as active_sessions
      FROM customers cu
@@ -647,7 +648,8 @@ admin.get('/activation-commands', async (c) => {
      WHERE p.number_mode = 'shared' AND s.status = 'active' AND s.end_date >= datetime('now')
      ORDER BY cu.name COLLATE NOCASE`
   ).all<{
-    id: number; name: string; activation_code: string | null; deactivation_code: string | null; active_sessions: number
+    id: number; name: string; activation_code: string | null; deactivation_code: string | null
+    feature_cumulative_list_enabled: number; feature_visa_check_enabled: number; active_sessions: number
   }>()
 
   const offices = (result.results || []).map((r) => ({
@@ -656,7 +658,11 @@ admin.get('/activation-commands', async (c) => {
     activation_command: r.activation_code || `${r.name} تفعيل`,
     activation_is_custom: !!r.activation_code,
     deactivation_command: r.deactivation_code || null,
-    active_sessions: r.active_sessions || 0
+    active_sessions: r.active_sessions || 0,
+    features: {
+      cumulative_list: { enabled: !!r.feature_cumulative_list_enabled, enable_command: 'تفعيل القائمة', disable_command: 'الغاء القائمة' },
+      visa_check: { enabled: !!r.feature_visa_check_enabled, enable_command: 'تفعيل فحص التاشيره', disable_command: 'الغاء فحص التاشيره' }
+    }
   }))
 
   return c.json({ offices })

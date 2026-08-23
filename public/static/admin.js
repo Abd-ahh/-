@@ -1121,6 +1121,14 @@ async function renderActivationCommands(area) {
           <div class="font-bold text-gray-700 mb-1">إرسال مقترح</div>
           <div class="text-gray-500">اقتراح: ... (النص بعد الكلمة يُحفظ في صندوق المقترحات)</div>
         </div>
+        <div class="bg-white rounded-xl p-3 border border-blue-100">
+          <div class="font-bold text-gray-700 mb-1">تفعيل/إلغاء القائمة التراكمية (لكل مكتب)</div>
+          <div class="text-gray-500">تفعيل القائمة ← تشغيل | الغاء القائمة ← إيقاف (معطّلة افتراضياً)</div>
+        </div>
+        <div class="bg-white rounded-xl p-3 border border-blue-100">
+          <div class="font-bold text-gray-700 mb-1">تفعيل/إلغاء فحص التأشيرة التلقائي (لكل مكتب)</div>
+          <div class="text-gray-500">تفعيل فحص التاشيره ← تشغيل | الغاء فحص التاشيره ← إيقاف (معطّلة افتراضياً)</div>
+        </div>
       </div>
     </div>
 
@@ -1139,6 +1147,7 @@ async function renderActivationCommands(area) {
           <th class="p-4 font-medium">أمر التفعيل</th>
           <th class="p-4 font-medium">أمر الإلغاء</th>
           <th class="p-4 font-medium">جلسات نشطة</th>
+          <th class="p-4 font-medium">حالة الميزات</th>
           <th class="p-4 font-medium"></th>
         </tr></thead>
         <tbody id="activation-tbody"></tbody>
@@ -1168,10 +1177,25 @@ function renderActivationRows() {
           : '<span class="text-gray-400 text-xs">لا يوجد أمر إلغاء</span>'}
       </td>
       <td class="p-4 text-gray-500">${o.active_sessions}</td>
+      <td class="p-4">${featureBadges(o.features)}</td>
       <td class="p-4">
         <button onclick="openCustomerDetail(${o.id})" class="text-brand-600 hover:underline text-xs font-bold">تعديل</button>
       </td>
-    </tr>`).join('') || '<tr><td colspan="5" class="p-8 text-center text-gray-400">لا يوجد مكاتب على الرقم المشترك حالياً</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="6" class="p-8 text-center text-gray-400">لا يوجد مكاتب على الرقم المشترك حالياً</td></tr>';
+}
+
+// Feature toggles are set ONLY via WhatsApp commands ("بأوامر فقط") — this
+// is a read-only status display, no edit control here on purpose.
+function featureBadges(features) {
+  if (!features) return '';
+  const badge = (label, enabled) => `
+    <span class="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full ${enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500'}">
+      <i class="fa-solid ${enabled ? 'fa-check' : 'fa-xmark'}"></i> ${label}
+    </span>`;
+  return `<div class="flex flex-col gap-1">
+    ${badge('القائمة التراكمية', features.cumulative_list?.enabled)}
+    ${badge('فحص التأشيرة', features.visa_check?.enabled)}
+  </div>`;
 }
 
 window.filterActivationCommands = function (value) {

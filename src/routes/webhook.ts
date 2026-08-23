@@ -5,7 +5,7 @@ import { downloadMedia, sendTextMessage, sendDocumentMessage, uploadMedia, markM
 import { extractPassportData } from '../lib/gemini'
 import { AVAILABLE_FIELDS, parseExtractionFields } from '../lib/fields'
 import { extractOfficeActivationCode, matchOfficeByName, matchByCustomCommand } from '../lib/office'
-import { buildConversationKey } from '../lib/commands'
+import { buildConversationKey, parseCommand } from '../lib/commands'
 import { handleTextCommand } from '../lib/commandHandlers'
 import { appendToCumulativeList, buildCumulativeListMessage, parseCumulativeFields } from '../lib/cumulative'
 import { getSetting, UNACTIVATED_WELCOME_KEY } from '../lib/settings'
@@ -173,7 +173,12 @@ async function handleIncomingMessage(params: {
       if (customMatch) matched = { id: customMatch.id, name: customMatch.name }
     }
 
-    const officeNameRaw = !matched ? extractOfficeActivationCode(messageText) : null
+    // "تفعيل القائمة" / "تفعيل فحص التاشيره" are fixed per-feature toggle
+    // commands (commands.ts), NOT office-activation attempts — exclude them
+    // here so extractOfficeActivationCode doesn't misread "القائمة"/"فحص
+    // التاشيره" as an office name and reply with a bogus "office not found".
+    const isFeatureToggleCommand = parseCommand(messageText)?.type === 'toggle_feature'
+    const officeNameRaw = !matched && !isFeatureToggleCommand ? extractOfficeActivationCode(messageText) : null
     if (!matched && officeNameRaw) {
       // Name-based pattern only applies to offices that have NOT set a
       // custom activation command (a custom command fully replaces it).
@@ -390,24 +395,28 @@ async function handleIncomingMessage(params: {
 
     // Cumulative running list (feature 2): append this extraction and
     // resend the updated numbered list, best-effort (must not affect the
-    // already-successful main extraction outcome above).
-    try {
-      const fieldKeys = parseCumulativeFields(customer?.cumulative_list_fields)
-      const resetHours = customer?.cumulative_list_reset_hours ?? 24
-      const items = await appendToCumulativeList(DB, customerId, conversationKey, resetHours, fieldKeys, extraction)
-      await sendTextMessage(
-        phoneNumberId, accessToken, senderPhone,
-        buildCumulativeListMessage(items, lang, fieldKeys),
-        WHATSAPP_API_VERSION
-      ).catch(() => {})
-    } catch (err) {
-      console.error('Cumulative list update failed', err)
+    // already-successful main extraction outcome above). Gated behind the
+    // office's own "تفعيل القائمة" command (defaults to disabled).
+    if (customer?.feature_cumulative_list_enabled) {
+      try {
+        const fieldKeys = parseCumulativeFields(customer?.cumulative_list_fields)
+        const resetHours = customer?.cumulative_list_reset_hours ?? 24
+        const items = await appendToCumulativeList(DB, customerId, conversationKey, resetHours, fieldKeys, extraction)
+        await sendTextMessage(
+          phoneNumberId, accessToken, senderPhone,
+          buildCumulativeListMessage(items, lang, fieldKeys),
+          WHATSAPP_API_VERSION
+        ).catch(() => {})
+      } catch (err) {
+        console.error('Cumulative list update failed', err)
+      }
     }
 
     // Periodic Umrah visa auto-check (feature 4): second, parallel service
     // option alongside the extraction reply above. Only starts if we have
-    // both a passport number and a first name to search MOFA with.
-    if (extraction.passport_number && extraction.full_name_ar) {
+    // both a passport number and a first name to search MOFA with, AND the
+    // office has enabled it via "تفعيل فحص التاشيره" (defaults to disabled).
+    if (customer?.feature_visa_check_enabled && extraction.passport_number && extraction.full_name_ar) {
       try {
         const firstName = extraction.full_name_ar.trim().split(/\s+/)[0]
         const nextCheckAt = new Date(Date.now() + VISA_CHECK_INITIAL_DELAY_MIN * 60 * 1000).toISOString()
@@ -534,7 +543,10 @@ webhook.post('/bridge/message', async (c) => {
     )
     if (customMatch) matched = { id: customMatch.id, name: customMatch.name }
 
-    const officeNameRaw = !matched ? extractOfficeActivationCode(messageText) : null
+    // Exclude fixed per-feature toggle commands from office-name matching
+    // (see equivalent comment in the private/shared-number path above).
+    const isFeatureToggleCommand = parseCommand(messageText)?.type === 'toggle_feature'
+    const officeNameRaw = !matched && !isFeatureToggleCommand ? extractOfficeActivationCode(messageText) : null
     if (!matched && officeNameRaw) {
       const nameCandidates = allCandidates.filter((cc) => !cc.activation_code)
       matched = matchOfficeByName(nameCandidates, officeNameRaw)
@@ -561,9 +573,21 @@ webhook.post('/bridge/message', async (c) => {
       return c.json({})
     }
 
-    // Linked group, but this text message isn't a passport image and isn't
-    // an activation/deactivation command — stay silent (avoid spamming an
-    // active group conversation with guidance on every text message).
+    // Linked group: the only other text commands supported are the
+    // per-feature enable/disable toggles (Feature 2 / Feature 4). Anything
+    // else stays silent (avoid spamming an active group conversation with
+    // guidance on every text message).
+    const toggleCmd = parseCommand(messageText)
+    if (toggleCmd?.type === 'toggle_feature') {
+      const linkedCustomer = await DB.prepare('SELECT reply_language FROM customers WHERE id = ?')
+        .bind(existingGroup.customer_id).first<{ reply_language: string | null }>()
+      const groupLang = linkedCustomer?.reply_language === 'en' ? 'en' : 'ar'
+      const outcome = await handleTextCommand(DB, { reply_language: groupLang }, existingGroup.customer_id, buildConversationKey({ group_jid }), groupLang, messageText)
+      if (outcome?.kind === 'text') {
+        return c.json({ reply: outcome.text })
+      }
+    }
+
     return c.json({})
   }
 
@@ -671,16 +695,18 @@ webhook.post('/bridge/message', async (c) => {
     // message is appended to the same reply instead of being sent separately.
     const conversationKey = buildConversationKey({ group_jid })
 
-    try {
-      const fieldKeys = parseCumulativeFields(customer?.cumulative_list_fields)
-      const resetHours = customer?.cumulative_list_reset_hours ?? 24
-      const items = await appendToCumulativeList(DB, customerId, conversationKey, resetHours, fieldKeys, extraction)
-      reply += '\n\n' + buildCumulativeListMessage(items, lang, fieldKeys)
-    } catch (err) {
-      console.error('Cumulative list update failed (group)', err)
+    if (customer?.feature_cumulative_list_enabled) {
+      try {
+        const fieldKeys = parseCumulativeFields(customer?.cumulative_list_fields)
+        const resetHours = customer?.cumulative_list_reset_hours ?? 24
+        const items = await appendToCumulativeList(DB, customerId, conversationKey, resetHours, fieldKeys, extraction)
+        reply += '\n\n' + buildCumulativeListMessage(items, lang, fieldKeys)
+      } catch (err) {
+        console.error('Cumulative list update failed (group)', err)
+      }
     }
 
-    if (extraction.passport_number && extraction.full_name_ar) {
+    if (customer?.feature_visa_check_enabled && extraction.passport_number && extraction.full_name_ar) {
       try {
         const firstName = extraction.full_name_ar.trim().split(/\s+/)[0]
         const nextCheckAt = new Date(Date.now() + VISA_CHECK_INITIAL_DELAY_MIN * 60 * 1000).toISOString()

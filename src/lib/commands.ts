@@ -5,20 +5,47 @@
 // can be added here without touching the office-matching logic.
 import { normalizeArabicText } from './office'
 
+export type ToggleableFeature = 'cumulative_list' | 'visa_check'
+
 export type ParsedCommand =
   | { type: 'check_now' }
   | { type: 'list' }
   | { type: 'report'; period: 'daily' | 'monthly' | 'yearly'; format: 'text' | 'pdf' }
   | { type: 'suggestion'; text: string }
+  | { type: 'toggle_feature'; feature: ToggleableFeature; enabled: boolean }
   | null
 
 const CHECK_NOW_PHRASES = ['فحص التاشيره', 'فحص التأشيرة', 'فحص الفيزا', 'تحقق من التاشيره', 'تحقق التاشيره']
 const LIST_PHRASES = ['القائمه', 'القائمة', 'قائمه الاسماء', 'قائمة الأسماء']
 
+// Fixed (non-customizable) per-feature enable/disable commands. Unlike the
+// office-level activation/deactivation codes (office.ts), these are the
+// same for every office on purpose — they toggle a specific platform
+// feature ON/OFF for an office that is already activated in general.
+const ENABLE_LIST_PHRASES = ['تفعيل القائمة', 'تفعيل القائمه']
+const DISABLE_LIST_PHRASES = ['الغاء القائمة', 'إلغاء القائمة', 'الغاء القائمه', 'إلغاء القائمه']
+const ENABLE_VISACHECK_PHRASES = ['تفعيل فحص التاشيره', 'تفعيل فحص التأشيرة']
+const DISABLE_VISACHECK_PHRASES = ['الغاء فحص التاشيره', 'إلغاء فحص التاشيره', 'الغاء فحص التأشيرة', 'إلغاء فحص التأشيرة']
+
 export function parseCommand(rawText: string): ParsedCommand {
   const text = (rawText || '').trim()
   if (!text) return null
   const normalized = normalizeArabicText(text)
+
+  // Feature toggle commands are checked first (exact match) since they are
+  // fixed phrases that must not be shadowed by the more generic checks below.
+  if (ENABLE_LIST_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {
+    return { type: 'toggle_feature', feature: 'cumulative_list', enabled: true }
+  }
+  if (DISABLE_LIST_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {
+    return { type: 'toggle_feature', feature: 'cumulative_list', enabled: false }
+  }
+  if (ENABLE_VISACHECK_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {
+    return { type: 'toggle_feature', feature: 'visa_check', enabled: true }
+  }
+  if (DISABLE_VISACHECK_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {
+    return { type: 'toggle_feature', feature: 'visa_check', enabled: false }
+  }
 
   if (CHECK_NOW_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {
     return { type: 'check_now' }
