@@ -69,6 +69,12 @@ function statusBadge(status) {
     connected: ['bg-emerald-50 text-emerald-700', 'متصل'],
     pending: ['bg-amber-50 text-amber-700', 'قيد الربط'],
     disconnected: ['bg-red-50 text-red-700', 'غير متصل'],
+    checking: ['bg-blue-50 text-blue-700', 'جاري الفحص'],
+    found: ['bg-emerald-50 text-emerald-700', 'تم الإصدار'],
+    cancelled: ['bg-gray-100 text-gray-500', 'ملغاة'],
+    new: ['bg-amber-50 text-amber-700', 'جديد'],
+    reviewed: ['bg-blue-50 text-blue-700', 'تمت المراجعة'],
+    done: ['bg-emerald-50 text-emerald-700', 'مُنفّذ'],
   };
   const [cls, label] = map[status] || ['bg-gray-100 text-gray-600', status];
   return `<span class="text-xs font-bold px-2.5 py-1 rounded-full ${cls}">${label}</span>`;
@@ -87,7 +93,8 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
 
 const titles = {
   overview: 'نظرة عامة', customers: 'العملاء', packages: 'الباقات',
-  numbers: 'أرقام واتساب', groups: 'مجموعات واتساب', operations: 'سجل العمليات', test: 'اختبار الاستخراج'
+  numbers: 'أرقام واتساب', groups: 'مجموعات واتساب', operations: 'سجل العمليات', test: 'اختبار الاستخراج',
+  welcome: 'رسالة الترحيب', suggestions: 'صندوق المقترحات', visachecks: 'فحوصات التأشيرات'
 };
 
 function switchTab(tab) {
@@ -110,6 +117,9 @@ async function render() {
     else if (currentTab === 'numbers') await renderNumbers(area);
     else if (currentTab === 'groups') await renderGroups(area);
     else if (currentTab === 'operations') await renderOperations(area);
+    else if (currentTab === 'welcome') await renderWelcome(area);
+    else if (currentTab === 'suggestions') await renderSuggestions(area);
+    else if (currentTab === 'visachecks') await renderVisaChecks(area);
     else if (currentTab === 'test') await renderTest(area);
   } catch (err) {
     if (guardAuth(err)) return;
@@ -945,6 +955,139 @@ window.runTestExtraction = async function () {
     }
   };
   reader.readAsDataURL(file);
+};
+
+// ---------------- Feature 1: unified welcome/activation message ----------------
+async function renderWelcome(area) {
+  const { data } = await axios.get(`${API}/welcome-message`);
+  area.innerHTML = `
+    <div class="bg-white rounded-2xl border border-gray-100 p-8 max-w-2xl">
+      <h3 class="font-bold text-lg mb-2">رسالة الترحيب الموحّدة</h3>
+      <p class="text-sm text-gray-500 mb-5">
+        تُرسَل تلقائياً لأي عميل غير مُفعَّل يكتب رسالة نصية (بدون صورة) على الرقم الخاص أو المشترك.
+        <strong>ملاحظة:</strong> المجموعات لا تستقبل هذه الرسالة أبداً — تبقى صامتة حتى تُفعَّل بأمر النص المخصص للمكتب.
+      </p>
+      <textarea id="wc-message" rows="6" class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-brand-500" placeholder="مثال: مرحباً بك 👋 أرسل صورة جواز السفر وسنقوم باستخراج بياناته فوراً.">${data.message || ''}</textarea>
+      <div id="wc-error" class="hidden text-red-600 text-sm bg-red-50 rounded-lg p-3 mt-4"></div>
+      <div id="wc-success" class="hidden text-emerald-600 text-sm bg-emerald-50 rounded-lg p-3 mt-4">تم الحفظ بنجاح</div>
+      <button onclick="saveWelcomeMessage()" class="mt-5 bg-brand-600 hover:bg-brand-700 text-white font-bold px-6 py-3 rounded-xl">
+        <i class="fa-solid fa-floppy-disk ml-1"></i> حفظ الرسالة
+      </button>
+    </div>
+  `;
+}
+
+window.saveWelcomeMessage = async function () {
+  const message = document.getElementById('wc-message').value;
+  const errEl = document.getElementById('wc-error');
+  const okEl = document.getElementById('wc-success');
+  errEl.classList.add('hidden');
+  okEl.classList.add('hidden');
+  try {
+    await axios.put(`${API}/welcome-message`, { message });
+    okEl.classList.remove('hidden');
+    setTimeout(() => okEl.classList.add('hidden'), 2500);
+  } catch (err) {
+    if (guardAuth(err)) return;
+    errEl.textContent = err?.response?.data?.error || 'حدث خطأ';
+    errEl.classList.remove('hidden');
+  }
+};
+
+// ---------------- Feature 3: suggestion box ----------------
+let suggestionsFilter = '';
+async function renderSuggestions(area) {
+  const { data } = await axios.get(`${API}/suggestions`, { params: suggestionsFilter ? { status: suggestionsFilter } : {} });
+  const items = data.suggestions;
+  area.innerHTML = `
+    <div class="flex items-center gap-2 mb-5">
+      ${['', 'new', 'reviewed', 'done'].map(s => `
+        <button onclick="filterSuggestions('${s}')" class="px-4 py-2 rounded-xl text-sm font-bold ${suggestionsFilter === s ? 'bg-brand-600 text-white' : 'bg-white border border-gray-200 text-gray-600'}">
+          ${s === '' ? 'الكل' : s === 'new' ? 'جديد' : s === 'reviewed' ? 'تمت المراجعة' : 'مُنفّذ'}
+        </button>`).join('')}
+    </div>
+    <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
+          <th class="p-4 font-medium">المكتب</th><th class="p-4 font-medium">المقترح</th>
+          <th class="p-4 font-medium">الحالة</th><th class="p-4 font-medium">التاريخ</th><th class="p-4 font-medium"></th>
+        </tr></thead>
+        <tbody>
+          ${items.map(s => `
+            <tr class="border-b border-gray-50">
+              <td class="p-4 font-semibold">${s.customer_name || '-'}</td>
+              <td class="p-4 text-gray-600 max-w-md">${s.message}</td>
+              <td class="p-4">${statusBadge(s.status)}</td>
+              <td class="p-4 text-gray-400 text-xs">${fmtDate(s.created_at)}</td>
+              <td class="p-4">
+                <select onchange="updateSuggestionStatus(${s.id}, this.value)" class="text-xs border border-gray-200 rounded-lg px-2 py-1">
+                  <option value="new" ${s.status === 'new' ? 'selected' : ''}>جديد</option>
+                  <option value="reviewed" ${s.status === 'reviewed' ? 'selected' : ''}>تمت المراجعة</option>
+                  <option value="done" ${s.status === 'done' ? 'selected' : ''}>مُنفّذ</option>
+                </select>
+              </td>
+            </tr>`).join('') || '<tr><td colspan="5" class="p-8 text-center text-gray-400">لا توجد مقترحات بعد</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+window.filterSuggestions = function (status) {
+  suggestionsFilter = status;
+  render();
+};
+
+window.updateSuggestionStatus = async function (id, status) {
+  try {
+    await axios.put(`${API}/suggestions/${id}`, { status });
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+  render();
+};
+
+// ---------------- Feature 4: Umrah visa-check monitor ----------------
+let visaChecksFilter = '';
+async function renderVisaChecks(area) {
+  const { data } = await axios.get(`${API}/visa-checks`, { params: visaChecksFilter ? { status: visaChecksFilter } : {} });
+  const items = data.checks;
+  area.innerHTML = `
+    <div class="flex items-center gap-2 mb-5 flex-wrap">
+      ${['', 'pending', 'checking', 'found', 'failed', 'cancelled'].map(s => `
+        <button onclick="filterVisaChecks('${s}')" class="px-4 py-2 rounded-xl text-sm font-bold ${visaChecksFilter === s ? 'bg-brand-600 text-white' : 'bg-white border border-gray-200 text-gray-600'}">
+          ${s === '' ? 'الكل' : statusBadge(s).replace(/<[^>]+>/g, '')}
+        </button>`).join('')}
+    </div>
+    <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
+          <th class="p-4 font-medium">المكتب</th><th class="p-4 font-medium">الاسم</th>
+          <th class="p-4 font-medium">رقم الجواز</th><th class="p-4 font-medium">الحالة</th>
+          <th class="p-4 font-medium">عدد المحاولات</th><th class="p-4 font-medium">آخر فحص</th>
+          <th class="p-4 font-medium">الفحص القادم</th>
+        </tr></thead>
+        <tbody>
+          ${items.map(v => `
+            <tr class="border-b border-gray-50">
+              <td class="p-4 font-semibold">${v.customer_name || '-'}</td>
+              <td class="p-4">${v.first_name}</td>
+              <td class="p-4 text-gray-500">${v.passport_number}</td>
+              <td class="p-4">${statusBadge(v.status)}</td>
+              <td class="p-4 text-gray-500">${v.check_count}</td>
+              <td class="p-4 text-gray-400 text-xs">${fmtDate(v.last_checked_at)}</td>
+              <td class="p-4 text-gray-400 text-xs">${v.status === 'pending' || v.status === 'checking' ? fmtDate(v.next_check_at) : '-'}</td>
+            </tr>`).join('') || '<tr><td colspan="7" class="p-8 text-center text-gray-400">لا توجد فحوصات بعد</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+window.filterVisaChecks = function (status) {
+  visaChecksFilter = status;
+  render();
 };
 
 // Init

@@ -308,6 +308,11 @@ async function renderOperations(area) {
 async function renderSettings(area) {
   const { data } = await axios.get(`${API}/me`);
   const c = data.customer;
+  const fields = await getFields();
+  let cumulativeFields = ['full_name_ar', 'passport_number'];
+  if (c.cumulative_list_fields) {
+    try { cumulativeFields = JSON.parse(c.cumulative_list_fields); } catch {}
+  }
   area.innerHTML = `
     <div class="bg-white rounded-2xl border border-gray-100 p-8 max-w-lg">
       <h3 class="font-bold text-lg mb-5">إعدادات الرد</h3>
@@ -343,6 +348,27 @@ async function renderSettings(area) {
         </div>
       </div>
 
+      <hr class="my-6" />
+      <h3 class="font-bold text-lg mb-2">القائمة التراكمية</h3>
+      <p class="text-xs text-gray-400 mb-4">بعد كل جواز يتم استخراجه، يُرسَل تلقائياً في نفس المحادثة قائمة تراكمية مرقّمة بكل الجوازات السابقة (يمكن أيضاً طلبها بكتابة "القائمة"). اختر الحقول التي تريد ظهورها في القائمة، ومتى تُصفَّر تلقائياً.</p>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-bold text-gray-700 mb-2">الحقول الظاهرة في القائمة</label>
+          <div class="grid grid-cols-2 gap-2">
+            ${fields.map(f => `
+              <label class="flex items-center gap-2 text-sm bg-gray-50 rounded-lg px-3 py-2 cursor-pointer">
+                <input type="checkbox" class="cum-field-cb" value="${f.key}" ${cumulativeFields.includes(f.key) ? 'checked' : ''} />
+                ${f.emoji} ${f.label_ar}
+              </label>`).join('')}
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-bold text-gray-700 mb-1.5">إعادة التصفير التلقائي بعد (ساعات)</label>
+          <input id="st-cum-hours" type="number" min="1" value="${c.cumulative_list_reset_hours || 24}" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <p class="text-xs text-gray-400 mt-1">مثال: 24 = تبدأ القائمة من جديد كل يوم لكل محادثة/مجموعة.</p>
+        </div>
+      </div>
+
       <div id="st-error" class="hidden text-red-600 text-sm bg-red-50 rounded-lg p-3 mt-4"></div>
       <div id="st-success" class="hidden text-emerald-600 text-sm bg-emerald-50 rounded-lg p-3 mt-4">تم الحفظ بنجاح</div>
       <button onclick="saveSettings()" class="mt-5 bg-brand-600 hover:bg-brand-700 text-white font-bold px-6 py-3 rounded-xl">حفظ الإعدادات</button>
@@ -351,12 +377,15 @@ async function renderSettings(area) {
 }
 
 window.saveSettings = async function () {
+  const cumulativeFields = Array.from(document.querySelectorAll('.cum-field-cb:checked')).map(cb => cb.value);
   const payload = {
     phone: document.getElementById('st-phone').value,
     reply_language: document.getElementById('st-lang').value,
     welcome_message: document.getElementById('st-welcome').value,
     activation_code: document.getElementById('st-activation').value,
-    deactivation_code: document.getElementById('st-deactivation').value
+    deactivation_code: document.getElementById('st-deactivation').value,
+    cumulative_list_fields: cumulativeFields,
+    cumulative_list_reset_hours: document.getElementById('st-cum-hours').value
   };
   const errEl = document.getElementById('st-error');
   const okEl = document.getElementById('st-success');
