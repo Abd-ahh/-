@@ -18,10 +18,12 @@ const SHARED_SESSION_DAYS = 30
 // this be fully customized (e.g. "for activation contact ...").
 const DEFAULT_WELCOME_MESSAGE = '👋 أهلاً وسهلاً! لتفعيل الخدمة يرجى التواصل مع إدارة المنصة.'
 
-// Umrah visa auto-check timing (feature 4): first check 3 hours after the
-// passport photo is received, then retry every 20 minutes until found.
-const VISA_CHECK_INITIAL_DELAY_MIN = 180
-const VISA_CHECK_RETRY_INTERVAL_MIN = 20
+// Umrah visa auto-check timing (feature 4): first check 30 minutes after the
+// passport photo is received, then retry every 30 minutes until found
+// (unified to a single interval by explicit user decision on 2026-08-23 —
+// was previously 180min initial delay / 20min retry interval).
+const VISA_CHECK_INITIAL_DELAY_MIN = 30
+const VISA_CHECK_RETRY_INTERVAL_MIN = 30
 
 const webhook = new Hono<AppEnv>()
 

@@ -24,8 +24,12 @@ const LIST_PHRASES = ['القائمه', 'القائمة', 'قائمه الاسم
 // feature ON/OFF for an office that is already activated in general.
 const ENABLE_LIST_PHRASES = ['تفعيل القائمة', 'تفعيل القائمه']
 const DISABLE_LIST_PHRASES = ['الغاء القائمة', 'إلغاء القائمة', 'الغاء القائمه', 'إلغاء القائمه']
-const ENABLE_VISACHECK_PHRASES = ['تفعيل فحص التاشيره', 'تفعيل فحص التأشيرة']
-const DISABLE_VISACHECK_PHRASES = ['الغاء فحص التاشيره', 'إلغاء فحص التاشيره', 'الغاء فحص التأشيرة', 'إلغاء فحص التأشيرة']
+// "فحص دوري" / "إلغاء الفحص الدوري" are synonyms added later for the same
+// toggle (periodic auto-check every VISA_CHECK_RETRY_INTERVAL_MIN minutes) —
+// kept alongside the original "تفعيل/الغاء فحص التاشيره" phrasing so offices
+// already using the old commands (e.g. مكتب النور) are unaffected.
+const ENABLE_VISACHECK_PHRASES = ['تفعيل فحص التاشيره', 'تفعيل فحص التأشيرة', 'فحص دوري']
+const DISABLE_VISACHECK_PHRASES = ['الغاء فحص التاشيره', 'إلغاء فحص التاشيره', 'الغاء فحص التأشيرة', 'إلغاء فحص التأشيرة', 'الغاء الفحص الدوري', 'إلغاء الفحص الدوري']
 
 export function parseCommand(rawText: string): ParsedCommand {
   const text = (rawText || '').trim()

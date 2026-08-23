@@ -50,8 +50,8 @@ export async function handleTextCommand(
     return {
       kind: 'text',
       text: lang === 'en'
-        ? '⚠️ The visa auto-check feature is not enabled. Send "تفعيل فحص التاشيره" to enable it.'
-        : '⚠️ ميزة فحص التأشيرة غير مفعّلة. أرسل "تفعيل فحص التاشيره" لتفعيلها.'
+        ? '⚠️ The visa auto-check feature is not enabled. Send "تفعيل فحص التاشيره" or "فحص دوري" to enable it.'
+        : '⚠️ ميزة فحص التأشيرة غير مفعّلة. أرسل "تفعيل فحص التاشيره" أو "فحص دوري" لتفعيلها.'
     }
   }
 

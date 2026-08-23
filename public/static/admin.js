@@ -1126,8 +1126,8 @@ async function renderActivationCommands(area) {
           <div class="text-gray-500">تفعيل القائمة ← تشغيل | الغاء القائمة ← إيقاف (معطّلة افتراضياً)</div>
         </div>
         <div class="bg-white rounded-xl p-3 border border-blue-100">
-          <div class="font-bold text-gray-700 mb-1">تفعيل/إلغاء فحص التأشيرة التلقائي (لكل مكتب)</div>
-          <div class="text-gray-500">تفعيل فحص التاشيره ← تشغيل | الغاء فحص التاشيره ← إيقاف (معطّلة افتراضياً)</div>
+          <div class="font-bold text-gray-700 mb-1">تفعيل/إلغاء الفحص الدوري لتأشيرة العمرة (لكل مكتب)</div>
+          <div class="text-gray-500">تفعيل فحص التاشيره / فحص دوري ← تشغيل (فحص تلقائي كل 30 دقيقة) | الغاء فحص التاشيره / إلغاء الفحص الدوري ← إيقاف (معطّلة افتراضياً)</div>
         </div>
       </div>
     </div>
