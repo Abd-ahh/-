@@ -7,6 +7,20 @@ import { AVAILABLE_FIELDS } from './fields'
 
 const DEFAULT_FIELDS = ['full_name_ar', 'passport_number']
 
+// `started_at` is stored as `new Date().toISOString()` (already ends in "Z",
+// e.g. "2026-08-23T18:13:25.088Z") when a list is created fresh here, but as
+// a bug-fix safety net we also accept SQLite's `datetime('now')` format
+// (space-separated, no "Z", e.g. "2026-08-23 18:13:25") in case any old rows
+// were written differently. BUG HISTORY: this used to unconditionally append
+// "Z" to the stored value before parsing, which turned an already-ISO string
+// into "...088ZZ" — an INVALID Date whose age comparison (NaN < resetHours)
+// always evaluated to false, silently resetting the cumulative list back to
+// a single item on every single passport instead of accumulating them.
+export function parseStoredTimestamp(value: string): Date {
+  const iso = value.includes('T') ? value : value.replace(' ', 'T')
+  return new Date(iso.endsWith('Z') ? iso : `${iso}Z`)
+}
+
 export function parseCumulativeFields(raw: string | null | undefined): string[] {
   if (!raw) return DEFAULT_FIELDS
   try {
@@ -51,8 +65,8 @@ export async function appendToCumulativeList(
   let startedAt = new Date().toISOString()
 
   if (existing) {
-    const ageHours = (Date.now() - new Date(existing.started_at + 'Z').getTime()) / (1000 * 60 * 60)
-    if (ageHours < resetHours) {
+    const ageHours = (Date.now() - parseStoredTimestamp(existing.started_at).getTime()) / (1000 * 60 * 60)
+    if (!Number.isNaN(ageHours) && ageHours < resetHours) {
       try {
         items = JSON.parse(existing.items_json) || []
       } catch {
@@ -84,8 +98,8 @@ export async function getCumulativeList(
     'SELECT * FROM cumulative_lists WHERE customer_id = ? AND conversation_key = ?'
   ).bind(customerId, conversationKey).first<any>()
   if (!existing) return []
-  const ageHours = (Date.now() - new Date(existing.started_at + 'Z').getTime()) / (1000 * 60 * 60)
-  if (ageHours >= resetHours) return []
+  const ageHours = (Date.now() - parseStoredTimestamp(existing.started_at).getTime()) / (1000 * 60 * 60)
+  if (Number.isNaN(ageHours) || ageHours >= resetHours) return []
   try {
     return JSON.parse(existing.items_json) || []
   } catch {

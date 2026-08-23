@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { requireCustomer } from '../lib/middleware'
 import { AVAILABLE_FIELDS, normalizeExtractionFields } from '../lib/fields'
-import { normalizeCumulativeFields, parseCumulativeFields } from '../lib/cumulative'
+import { normalizeCumulativeFields, parseCumulativeFields, parseStoredTimestamp } from '../lib/cumulative'
 import { parseConversationKey } from '../lib/commands'
 import type { AppEnv } from '../lib/types'
 
@@ -189,8 +189,8 @@ customer.get('/cumulative-lists', async (c) => {
   const lists: { conversation_key: string; label: string; items: any[]; started_at: string; updated_at: string }[] = []
 
   for (const row of rows.results || []) {
-    const ageHours = (Date.now() - new Date(row.started_at + 'Z').getTime()) / (1000 * 60 * 60)
-    if (ageHours >= resetHours) continue // expired — same rule as getCumulativeList, don't show a stale list
+    const ageHours = (Date.now() - parseStoredTimestamp(row.started_at).getTime()) / (1000 * 60 * 60)
+    if (Number.isNaN(ageHours) || ageHours >= resetHours) continue // expired — same rule as getCumulativeList, don't show a stale list
 
     let items: any[] = []
     try { items = JSON.parse(row.items_json) || [] } catch { items = [] }
