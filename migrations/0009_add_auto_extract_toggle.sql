@@ -24,18 +24,35 @@ ALTER TABLE customers ADD COLUMN feature_auto_extract_enabled INTEGER NOT NULL D
 
 -- Images received while feature_auto_extract_enabled=0, awaiting the
 -- "استخراج" command to be processed. Each row is deleted immediately after
--- a successful extraction attempt (Gemini responded, regardless of
--- classification) so re-sending "استخراج" never reprocesses/re-charges the
--- same image. On a transient failure (Gemini/network error) the row is kept
+-- a successful (or definitively-classified, e.g. not-a-passport) extraction
+-- attempt, so re-sending "استخراج" never reprocesses/re-charges the same
+-- image. On a transient failure (Gemini/network error) the row is kept
 -- with status='failed' so the next "استخراج" retries it.
+--
+-- Two storage strategies depending on channel, to stay well under D1's
+-- 2MB-per-row limit and avoid unnecessary storage:
+--   - Official/shared number (channel='number'): only the lightweight
+--     WhatsApp `media_id` + access is stored; the actual image bytes are
+--     downloaded from Meta's Graph API on demand when "استخراج" runs.
+--     NOTE: Meta expires inbound media IDs ~7 days after receipt, so a
+--     backlog left unprocessed for over a week may fail to download by
+--     the time "استخراج" is finally sent (rare in practice, but real).
+--   - WhatsApp-group bridge (channel='group'): the Baileys VPS process has
+--     no persistent media_id concept and sends the image as base64 in the
+--     original webhook payload, so that base64 must be stored directly.
 CREATE TABLE IF NOT EXISTS pending_extractions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
   conversation_key TEXT NOT NULL,
-  whatsapp_number_id INTEGER REFERENCES whatsapp_numbers(id) ON DELETE SET NULL,
+  channel TEXT NOT NULL, -- 'number' | 'group'
+  -- channel='number' fields
+  whatsapp_number_id INTEGER REFERENCES whatsapp_numbers(id) ON DELETE CASCADE,
   sender_phone TEXT,
+  media_id TEXT,
+  -- channel='group' fields
   group_jid TEXT,
-  image_base64 TEXT NOT NULL,
+  sender_jid TEXT,
+  image_base64 TEXT,
   mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
   status TEXT NOT NULL DEFAULT 'queued', -- queued | failed
   last_error TEXT,

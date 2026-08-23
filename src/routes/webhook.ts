@@ -3,7 +3,6 @@ import type { AppEnv } from '../lib/types'
 import type { WhatsAppWebhookBody } from '../lib/whatsapp'
 import { downloadMedia, sendTextMessage, sendDocumentMessage, uploadMedia, markMessageRead } from '../lib/whatsapp'
 import { extractPassportData } from '../lib/gemini'
-import { AVAILABLE_FIELDS, parseExtractionFields } from '../lib/fields'
 import { extractOfficeActivationCode, matchOfficeByName, matchByCustomCommand } from '../lib/office'
 import { buildConversationKey, parseCommand } from '../lib/commands'
 import { handleTextCommand } from '../lib/commandHandlers'
@@ -11,6 +10,7 @@ import { appendToCumulativeList, buildCumulativeListMessage, parseCumulativeFiel
 import { getSetting, UNACTIVATED_WELCOME_KEY } from '../lib/settings'
 import { deliverToConversation } from '../lib/deliver'
 import { runExtractionBatch } from '../lib/extractionBatch'
+import { buildResultMessage } from '../lib/passportMessage'
 
 const SHARED_SESSION_DAYS = 30
 
@@ -282,7 +282,7 @@ async function handleIncomingMessage(params: {
       if (outcome) {
         if (outcome.kind === 'text') {
           await sendTextMessage(phoneNumberId, accessToken, senderPhone, outcome.text, WHATSAPP_API_VERSION).catch(() => {})
-        } else {
+        } else if (outcome.kind === 'pdf_report') {
           await DB.prepare(
             `INSERT INTO render_jobs (customer_id, conversation_key, job_type, html, filename) VALUES (?, ?, 'report_pdf', ?, ?)`
           ).bind(customerId, conversationKey, outcome.html, outcome.filename).run()
@@ -291,6 +291,38 @@ async function handleIncomingMessage(params: {
             lang === 'en' ? '📄 Preparing your PDF report, it will arrive here shortly...' : '📄 يتم تجهيز ملف التقرير الآن، سيصلك هنا قريباً...',
             WHATSAPP_API_VERSION
           ).catch(() => {})
+        } else if (outcome.kind === 'run_extraction_batch') {
+          // "استخراج" (feature 6): process everything queued for this
+          // conversation in one batch, then send each result in sequence —
+          // the private/shared-number channel can send multiple messages
+          // directly via the Graph API, unlike the group bridge below.
+          const batchResult = await runExtractionBatch(
+            { DB, PASSPORTS_BUCKET, GEMINI_API_KEY, WHATSAPP_API_VERSION },
+            customerId,
+            conversationKey,
+            customer,
+            lang,
+            MAX_EXTRACTION_BATCH_SIZE,
+            new Map([[numberRow.id as number, accessToken as string]])
+          ).catch((err) => {
+            console.error('runExtractionBatch failed', err)
+            return null
+          })
+
+          if (batchResult) {
+            for (const item of batchResult.processed) {
+              await sendTextMessage(phoneNumberId, accessToken, senderPhone, item.message, WHATSAPP_API_VERSION).catch(() => {})
+            }
+            if (batchResult.remainingQueued > 0) {
+              await sendTextMessage(
+                phoneNumberId, accessToken, senderPhone,
+                lang === 'en'
+                  ? `ℹ️ ${batchResult.remainingQueued} image(s) are still queued. Send "استخراج" again to continue processing.`
+                  : `ℹ️ لا تزال هناك ${batchResult.remainingQueued} صورة بانتظار الاستخراج. أرسل "استخراج" مرة أخرى للمتابعة.`,
+                WHATSAPP_API_VERSION
+              ).catch(() => {})
+            }
+          }
         }
         return
       }
@@ -316,6 +348,26 @@ async function handleIncomingMessage(params: {
 
   if (activeSub.operations_used >= activeSub.operations_limit) {
     await sendTextMessage(phoneNumberId, accessToken, senderPhone, T.limitReached, WHATSAPP_API_VERSION).catch(() => {})
+    return
+  }
+
+  // Feature 6 (Auto-Extract toggle, migration 0009, default DISABLED): when
+  // disabled, queue this image instead of processing it immediately — no
+  // Gemini call, no quota deduction. The office sends "استخراج" whenever it
+  // wants to process everything queued for this conversation in one batch.
+  if (!customer?.feature_auto_extract_enabled) {
+    await DB.prepare(
+      `INSERT INTO pending_extractions (customer_id, conversation_key, channel, whatsapp_number_id, sender_phone, media_id, mime_type)
+       VALUES (?, ?, 'number', ?, ?, ?, ?)`
+    ).bind(customerId, conversationKey, numberRow.id, senderPhone, msg.image.id, msg.image.mime_type || 'image/jpeg').run()
+
+    await sendTextMessage(
+      phoneNumberId, accessToken, senderPhone,
+      lang === 'en'
+        ? '📥 Image received and queued. Send "استخراج" to process all queued images now.'
+        : '📥 تم استلام الصورة وحفظها بانتظار الاستخراج. أرسل "استخراج" لمعالجة كل الصور المنتظرة الآن.',
+      WHATSAPP_API_VERSION
+    ).catch(() => {})
     return
   }
 
@@ -446,28 +498,6 @@ async function handleIncomingMessage(params: {
   }
 }
 
-// Builds the WhatsApp reply text, restricted to the fields configured for this
-// number (extraction_fields JSON column; null/empty = all fields, default).
-// Each value is wrapped in ``` (monospace) on its own line so the recipient
-// can long-press just that line in WhatsApp and tap "Copy" — WhatsApp has no
-// native "copy button" API for business messages, so this is the closest
-// practical equivalent.
-function buildResultMessage(r: any, lang: 'ar' | 'en', extractionFieldsRaw: string | null): string {
-  const allowedKeys = parseExtractionFields(extractionFieldsRaw)
-  const fieldsToShow = AVAILABLE_FIELDS.filter((f) => allowedKeys.includes(f.key) && r[f.key])
-
-  const header = lang === 'en' ? '✅ Passport data extracted successfully:' : '✅ تم استخراج بيانات الجواز بنجاح:'
-  const lines = [header, '']
-
-  for (const f of fieldsToShow) {
-    const label = lang === 'en' ? f.label_en : f.label_ar
-    lines.push(`${f.emoji} ${label}:`)
-    lines.push('```' + r[f.key] + '```')
-  }
-
-  return lines.join('\n')
-}
-
 // =========================================================
 // WhatsApp GROUP bridge endpoint
 // =========================================================
@@ -583,17 +613,50 @@ webhook.post('/bridge/message', async (c) => {
     }
 
     // Linked group: the only other text commands supported are the
-    // per-feature enable/disable toggles (Feature 2 / Feature 4). Anything
-    // else stays silent (avoid spamming an active group conversation with
+    // per-feature enable/disable toggles (Feature 2 / Feature 4 / Feature 6)
+    // and "استخراج" (Feature 6, run the queued-images batch). Anything else
+    // stays silent (avoid spamming an active group conversation with
     // guidance on every text message).
-    const toggleCmd = parseCommand(messageText)
-    if (toggleCmd?.type === 'toggle_feature') {
-      const linkedCustomer = await DB.prepare('SELECT reply_language FROM customers WHERE id = ?')
-        .bind(existingGroup.customer_id).first<{ reply_language: string | null }>()
+    const groupCmd = parseCommand(messageText)
+    if (groupCmd?.type === 'toggle_feature' || groupCmd?.type === 'extract_now') {
+      const linkedCustomer = await DB.prepare('SELECT * FROM customers WHERE id = ?')
+        .bind(existingGroup.customer_id).first<any>()
       const groupLang = linkedCustomer?.reply_language === 'en' ? 'en' : 'ar'
-      const outcome = await handleTextCommand(DB, { reply_language: groupLang }, existingGroup.customer_id, buildConversationKey({ group_jid }), groupLang, messageText)
+      const groupConversationKey = buildConversationKey({ group_jid })
+      const outcome = await handleTextCommand(DB, linkedCustomer, existingGroup.customer_id, groupConversationKey, groupLang, messageText)
       if (outcome?.kind === 'text') {
         return c.json({ reply: outcome.text })
+      }
+      if (outcome?.kind === 'run_extraction_batch') {
+        // Group bridge only supports a single { reply } string per inbound
+        // webhook call — concatenate every processed item's message plus an
+        // optional "remaining queued" note into one reply.
+        const batchResult = await runExtractionBatch(
+          { DB, GEMINI_API_KEY },
+          existingGroup.customer_id,
+          groupConversationKey,
+          linkedCustomer,
+          groupLang,
+          MAX_EXTRACTION_BATCH_SIZE,
+          null
+        ).catch((err) => {
+          console.error('runExtractionBatch failed (group)', err)
+          return null
+        })
+
+        if (!batchResult) {
+          return c.json({ reply: groupLang === 'en' ? '❌ An error occurred while processing the queued images.' : '❌ حدث خطأ أثناء معالجة الصور المنتظرة.' })
+        }
+
+        const parts = batchResult.processed.map((item) => item.message)
+        if (batchResult.remainingQueued > 0) {
+          parts.push(
+            groupLang === 'en'
+              ? `ℹ️ ${batchResult.remainingQueued} image(s) are still queued. Send "استخراج" again to continue processing.`
+              : `ℹ️ لا تزال هناك ${batchResult.remainingQueued} صورة بانتظار الاستخراج. أرسل "استخراج" مرة أخرى للمتابعة.`
+          )
+        }
+        return c.json({ reply: parts.join('\n\n') })
       }
     }
 
@@ -646,6 +709,25 @@ webhook.post('/bridge/message', async (c) => {
 
   if (!image_base64) {
     return c.json({ reply: T.error })
+  }
+
+  const groupConversationKey = buildConversationKey({ group_jid })
+
+  // Feature 6 (Auto-Extract toggle, migration 0009, default DISABLED): when
+  // disabled, queue this image instead of processing it immediately — no
+  // Gemini call, no quota deduction. Send "استخراج" in the group whenever
+  // ready to process everything queued in one batch.
+  if (!customer?.feature_auto_extract_enabled) {
+    await DB.prepare(
+      `INSERT INTO pending_extractions (customer_id, conversation_key, channel, group_jid, sender_jid, image_base64, mime_type)
+       VALUES (?, ?, 'group', ?, ?, ?, ?)`
+    ).bind(customerId, groupConversationKey, group_jid, sender_jid, image_base64, mime_type || 'image/jpeg').run()
+
+    return c.json({
+      reply: lang === 'en'
+        ? '📥 Image received and queued. Send "استخراج" to process all queued images now.'
+        : '📥 تم استلام الصورة وحفظها بانتظار الاستخراج. أرسل "استخراج" لمعالجة كل الصور المنتظرة الآن.'
+    })
   }
 
   const opInsert = await DB.prepare(
@@ -702,13 +784,11 @@ webhook.post('/bridge/message', async (c) => {
     // handler only returns a single `reply` string per incoming message (the
     // Baileys bridge relays exactly one reply), so the cumulative-list
     // message is appended to the same reply instead of being sent separately.
-    const conversationKey = buildConversationKey({ group_jid })
-
     if (customer?.feature_cumulative_list_enabled) {
       try {
         const fieldKeys = parseCumulativeFields(customer?.cumulative_list_fields)
         const resetHours = customer?.cumulative_list_reset_hours ?? 24
-        const items = await appendToCumulativeList(DB, customerId, conversationKey, resetHours, fieldKeys, extraction)
+        const items = await appendToCumulativeList(DB, customerId, groupConversationKey, resetHours, fieldKeys, extraction)
         reply += '\n\n' + buildCumulativeListMessage(items, lang, fieldKeys)
       } catch (err) {
         console.error('Cumulative list update failed (group)', err)
@@ -722,7 +802,7 @@ webhook.post('/bridge/message', async (c) => {
         await DB.prepare(
           `INSERT INTO umrah_visa_checks (operation_id, customer_id, conversation_key, passport_number, first_name, nationality, next_check_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)`
-        ).bind(operationId, customerId, conversationKey, extraction.passport_number, firstName, extraction.nationality || null, nextCheckAt).run()
+        ).bind(operationId, customerId, groupConversationKey, extraction.passport_number, firstName, extraction.nationality || null, nextCheckAt).run()
       } catch (err) {
         console.error('Umrah visa check scheduling failed (group)', err)
       }
