@@ -14,6 +14,7 @@ export type ParsedCommand =
   | { type: 'report'; period: 'daily' | 'monthly' | 'yearly'; format: 'text' | 'pdf' }
   | { type: 'suggestion'; text: string }
   | { type: 'toggle_feature'; feature: ToggleableFeature; enabled: boolean }
+  | { type: 'help' }
   | null
 
 const CHECK_NOW_PHRASES = ['فحص التاشيره', 'فحص التأشيرة', 'فحص الفيزا', 'تحقق من التاشيره', 'تحقق التاشيره']
@@ -44,6 +45,11 @@ const DISABLE_VISACHECK_PHRASES = ['الغاء فحص التاشيره', 'إلغ
 const ENABLE_AUTOEXTRACT_PHRASES = ['تفعيل الاستخراج التلقائي', 'تفعيل الاستخراج الالي', 'تفعيل الاستخراج الآلي']
 const DISABLE_AUTOEXTRACT_PHRASES = ['الغاء الاستخراج التلقائي', 'إلغاء الاستخراج التلقائي', 'الغاء الاستخراج الالي', 'إلغاء الاستخراج الآلي']
 
+// "بوت" — a help command that replies with a welcome message plus the full
+// list of every feature's enable/disable commands (by user request). Works
+// identically on both channels (shared/private number + group bridge).
+const HELP_PHRASES = ['بوت']
+
 export function parseCommand(rawText: string): ParsedCommand {
   const text = (rawText || '').trim()
   if (!text) return null
@@ -68,6 +74,10 @@ export function parseCommand(rawText: string): ParsedCommand {
   }
   if (DISABLE_AUTOEXTRACT_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {
     return { type: 'toggle_feature', feature: 'auto_extract', enabled: false }
+  }
+
+  if (HELP_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {
+    return { type: 'help' }
   }
 
   if (CHECK_NOW_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {

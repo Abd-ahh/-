@@ -26,6 +26,10 @@ export async function handleTextCommand(
   const cmd = parseCommand(text)
   if (!cmd) return null
 
+  if (cmd.type === 'help') {
+    return { kind: 'text', text: buildHelpMessage(lang) }
+  }
+
   if (cmd.type === 'toggle_feature') {
     const columnByFeature: Record<string, string> = {
       cumulative_list: 'feature_cumulative_list_enabled',
@@ -163,4 +167,72 @@ export async function handleTextCommand(
   }
 
   return null
+}
+
+// Feature: "بوت" help command — replies with a welcome message plus the
+// full reference list of every feature's enable/disable command, by user
+// request. Static/bilingual text only (no DB reads), listing the FIXED
+// (non-customizable) per-feature toggle phrases exactly as recognized by
+// commands.ts, plus the other standalone commands available in an already
+// activated conversation. Kept in this module (not commands.ts) since it's
+// about building a reply, matching the pattern of the other command outcomes.
+function buildHelpMessage(lang: 'ar' | 'en'): string {
+  if (lang === 'en') {
+    return [
+      '👋 Welcome! How can I help you?',
+      '',
+      'Here are all the available commands for this conversation:',
+      '',
+      '📷 *Auto-extract (Feature 6)*',
+      '• "تفعيل الاستخراج التلقائي" — enable (process new passport photos immediately)',
+      '• "الغاء الاستخراج التلقائي" — disable (queue photos instead; use "استخراج" to process them)',
+      '• "استخراج" — process every queued/pending image now, in one batch',
+      '',
+      '📋 *Cumulative list (Feature 2)*',
+      '• "تفعيل القائمة" — enable',
+      '• "الغاء القائمة" — disable',
+      '• "القائمة" — show the current list',
+      '',
+      '🛂 *Visa auto-check (Feature 4)*',
+      '• "تفعيل فحص التاشيره" (or "فحص دوري") — enable periodic auto-check',
+      '• "الغاء فحص التاشيره" (or "الغاء الفحص الدوري") — disable',
+      '• "فحص التاشيره" — check now, once, for all pending visas',
+      '',
+      '📊 *Reports*',
+      '• "تقرير يومي" / "تقرير شهري" / "تقرير سنوي" — text report',
+      '• add "pdf" to any of the above for a PDF report',
+      '',
+      '💡 *Other*',
+      '• "اقتراح: <your text>" — send a feature suggestion to the platform admin',
+      '• "بوت" — show this help message again'
+    ].join('\n')
+  }
+  return [
+    '👋 أهلاً وسهلاً! كيف يمكنني أن أخدمك؟',
+    '',
+    'هذه كل الأوامر المتاحة في هذه المحادثة:',
+    '',
+    '📷 *الاستخراج التلقائي (الميزة 6)*',
+    '• "تفعيل الاستخراج التلقائي" — تفعيل (معالجة صور الجوازات الجديدة فوراً)',
+    '• "الغاء الاستخراج التلقائي" — إلغاء (حفظ الصور بانتظار الاستخراج بدل معالجتها فوراً؛ استخدم "استخراج" لمعالجتها)',
+    '• "استخراج" — معالجة كل الصور المنتظرة الآن دفعة واحدة',
+    '',
+    '📋 *القائمة التراكمية (الميزة 2)*',
+    '• "تفعيل القائمة" — تفعيل',
+    '• "الغاء القائمة" — إلغاء',
+    '• "القائمة" — عرض القائمة الحالية',
+    '',
+    '🛂 *فحص التأشيرة التلقائي (الميزة 4)*',
+    '• "تفعيل فحص التاشيره" (أو "فحص دوري") — تفعيل الفحص الدوري التلقائي',
+    '• "الغاء فحص التاشيره" (أو "الغاء الفحص الدوري") — إلغاء',
+    '• "فحص التاشيره" — فحص فوري لمرة واحدة لكل التأشيرات المعلّقة',
+    '',
+    '📊 *التقارير*',
+    '• "تقرير يومي" / "تقرير شهري" / "تقرير سنوي" — تقرير نصي',
+    '• أضف كلمة "pdf" لأي أمر تقرير أعلاه للحصول على ملف PDF',
+    '',
+    '💡 *أخرى*',
+    '• "اقتراح: <نص اقتراحك>" — إرسال اقتراح ميزة إلى إدارة المنصة',
+    '• "بوت" — عرض رسالة المساعدة هذه مرة أخرى'
+  ].join('\n')
 }

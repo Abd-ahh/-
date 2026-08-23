@@ -613,12 +613,13 @@ webhook.post('/bridge/message', async (c) => {
     }
 
     // Linked group: the only other text commands supported are the
-    // per-feature enable/disable toggles (Feature 2 / Feature 4 / Feature 6)
-    // and "استخراج" (Feature 6, run the queued-images batch). Anything else
-    // stays silent (avoid spamming an active group conversation with
-    // guidance on every text message).
+    // per-feature enable/disable toggles (Feature 2 / Feature 4 / Feature 6),
+    // "استخراج" (Feature 6, run the queued-images batch), and "بوت" (help
+    // message listing every command). Anything else stays silent (avoid
+    // spamming an active group conversation with guidance on every text
+    // message).
     const groupCmd = parseCommand(messageText)
-    if (groupCmd?.type === 'toggle_feature' || groupCmd?.type === 'extract_now') {
+    if (groupCmd?.type === 'toggle_feature' || groupCmd?.type === 'extract_now' || groupCmd?.type === 'help') {
       const linkedCustomer = await DB.prepare('SELECT * FROM customers WHERE id = ?')
         .bind(existingGroup.customer_id).first<any>()
       const groupLang = linkedCustomer?.reply_language === 'en' ? 'en' : 'ar'
