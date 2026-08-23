@@ -92,6 +92,7 @@ async function render() {
     else if (currentTab === 'numbers') await renderNumbers(area);
     else if (currentTab === 'operations') await renderOperations(area);
     else if (currentTab === 'cumulative') await renderCumulativeLists(area);
+    else if (currentTab === 'messagelists') await renderMessageLists(area);
     else if (currentTab === 'settings') await renderSettings(area);
   } catch (err) {
     if (guardAuth(err)) return;
@@ -443,6 +444,263 @@ async function renderSettings(area) {
     </div>
   `;
 }
+
+// ---------------- Message Lists (قوائم رسائل) — office self-service ----------------
+// Same feature as the admin's "قوائم الرسائل" tab, but always scoped to this
+// office's own contacts/lists (the server derives customer_id from the JWT,
+// never from anything sent by this page). WhatsApp-only, delivered via the
+// unofficial bridge.
+let mlContactsCache = [];
+let mlListsCache = [];
+
+async function renderMessageLists(area) {
+  area.innerHTML = `
+    <div class="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-xl p-4 mb-5">
+      <i class="fa-solid fa-circle-info ml-1"></i>
+      قوائم الرسائل تُرسَل عبر واتساب فقط — رسائل جماعية مجدولة حسب الوقت والتكرار (يومي/أسبوعي/شهري) لعملائك أو وكلائك.
+    </div>
+    <div id="ml-body"></div>
+  `;
+  await renderMessageListsBody();
+}
+
+async function renderMessageListsBody() {
+  const body = document.getElementById('ml-body');
+  body.innerHTML = '<div class="text-center text-gray-400 py-10"><i class="fa-solid fa-spinner fa-spin"></i></div>';
+
+  const [{ data: contactsData }, { data: listsData }] = await Promise.all([
+    axios.get(`${API}/message-contacts`),
+    axios.get(`${API}/message-lists`)
+  ]);
+  mlContactsCache = contactsData.contacts;
+  mlListsCache = listsData.lists;
+
+  body.innerHTML = `
+    <div class="grid lg:grid-cols-2 gap-6">
+      <div class="bg-white rounded-2xl border border-gray-100 p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-bold text-gray-900">جهات الاتصال (${mlContactsCache.length})</h3>
+          <button onclick="openMlContactModal()" class="bg-brand-600 hover:bg-brand-700 text-white text-xs font-bold px-3 py-2 rounded-lg"><i class="fa-solid fa-plus ml-1"></i> جهة اتصال</button>
+        </div>
+        <div class="space-y-2 max-h-96 overflow-y-auto">
+          ${mlContactsCache.map(ct => `
+            <div class="flex items-center justify-between bg-gray-50 rounded-lg p-3 text-sm">
+              <div>
+                <p class="font-semibold">${ct.name} ${ct.channel === 'group' ? '<span class=\"text-[10px] bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded-full mr-1\">مجموعة</span>' : ''}</p>
+                <p class="text-xs text-gray-400" dir="ltr">${ct.value}</p>
+                ${ct.region ? `<span class="text-[11px] text-brand-600 font-bold">#${ct.region}</span>` : ''}
+              </div>
+              <div class="flex gap-2">
+                <button onclick="openMlContactModal(${ct.id})" class="text-gray-400 hover:text-brand-600 text-xs"><i class="fa-solid fa-pen"></i></button>
+                <button onclick="deleteMlContact(${ct.id})" class="text-gray-400 hover:text-red-500 text-xs"><i class="fa-solid fa-trash"></i></button>
+              </div>
+            </div>`).join('') || '<p class="text-gray-400 text-center py-6 text-sm">لا توجد جهات اتصال بعد</p>'}
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-gray-100 p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-bold text-gray-900">القوائم (${mlListsCache.length})</h3>
+          <button onclick="openMlListModal()" class="bg-brand-600 hover:bg-brand-700 text-white text-xs font-bold px-3 py-2 rounded-lg"><i class="fa-solid fa-plus ml-1"></i> قائمة جديدة</button>
+        </div>
+        <div class="space-y-2 max-h-96 overflow-y-auto">
+          ${mlListsCache.map(l => `
+            <div class="bg-gray-50 rounded-lg p-3 text-sm">
+              <div class="flex items-center justify-between">
+                <p class="font-semibold">${l.name} ${l.is_active ? '' : '<span class=\"text-[10px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded-full mr-1\">متوقفة</span>'}</p>
+                <span class="text-xs text-gray-400">${l.schedule_time} — ${recurrenceLabel(l.recurrence)}</span>
+              </div>
+              <p class="text-xs text-gray-500 mt-1 line-clamp-2">${(l.message_text || '').slice(0, 80)}</p>
+              <div class="flex items-center justify-between mt-2">
+                <span class="text-[11px] text-gray-400">آخر إرسال: ${l.last_run_at ? fmtDate(l.last_run_at) : 'لم يُرسل بعد'}</span>
+                <div class="flex gap-2">
+                  <button onclick="sendMlListNow(${l.id})" class="text-emerald-600 hover:underline text-xs font-bold">إرسال الآن</button>
+                  <button onclick="openMlListModal(${l.id})" class="text-brand-600 hover:underline text-xs font-bold">تعديل</button>
+                  <button onclick="deleteMlList(${l.id})" class="text-red-500 hover:underline text-xs font-bold">حذف</button>
+                </div>
+              </div>
+            </div>`).join('') || '<p class="text-gray-400 text-center py-6 text-sm">لا توجد قوائم بعد</p>'}
+        </div>
+      </div>
+    </div>
+    <div id="modal-root"></div>
+  `;
+}
+
+function recurrenceLabel(r) {
+  return r === 'daily' ? 'يومي' : r === 'weekly' ? 'أسبوعي' : r === 'monthly' ? 'شهري' : r;
+}
+
+// ---- Contact modal ----
+window.openMlContactModal = function (id) {
+  const ct = id ? mlContactsCache.find(c => c.id === id) : null;
+  const modal = document.getElementById('modal-root');
+  modal.innerHTML = `
+    <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-2xl p-6 w-full max-w-md">
+        <h3 class="font-bold text-lg mb-4">${ct ? 'تعديل جهة اتصال' : 'جهة اتصال جديدة'}</h3>
+        <div class="space-y-3">
+          <input id="mc-name" value="${ct ? ct.name : ''}" placeholder="الاسم (مثال: وكيل صنعاء - أحمد)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <select id="mc-channel" class="w-full border border-gray-200 rounded-xl px-4 py-2.5">
+            <option value="number" ${!ct || ct.channel === 'number' ? 'selected' : ''}>رقم واتساب فردي</option>
+            <option value="group" ${ct && ct.channel === 'group' ? 'selected' : ''}>مجموعة واتساب (JID)</option>
+          </select>
+          <input id="mc-value" value="${ct ? ct.value : ''}" dir="ltr" placeholder="رقم الهاتف (967778260004) أو JID المجموعة" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="mc-region" value="${ct && ct.region ? ct.region : ''}" placeholder="المنطقة (اختياري، مثال: صنعاء)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+        </div>
+        <div id="mc-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-3"></div>
+        <div class="flex gap-3 mt-5">
+          <button onclick="submitMlContact(${id || 'null'})" class="flex-1 bg-brand-600 text-white font-bold py-2.5 rounded-xl">حفظ</button>
+          <button onclick="document.getElementById('modal-root').innerHTML=''" class="flex-1 bg-gray-100 text-gray-700 font-bold py-2.5 rounded-xl">إلغاء</button>
+        </div>
+      </div>
+    </div>
+  `;
+};
+
+window.submitMlContact = async function (id) {
+  const payload = {
+    name: document.getElementById('mc-name').value.trim(),
+    channel: document.getElementById('mc-channel').value,
+    value: document.getElementById('mc-value').value.trim(),
+    region: document.getElementById('mc-region').value.trim() || null
+  };
+  const errEl = document.getElementById('mc-error');
+  try {
+    if (id) await axios.put(`${API}/message-contacts/${id}`, payload);
+    else await axios.post(`${API}/message-contacts`, payload);
+    document.getElementById('modal-root').innerHTML = '';
+    renderMessageListsBody();
+  } catch (err) {
+    if (guardAuth(err)) return;
+    errEl.textContent = err?.response?.data?.error || 'حدث خطأ';
+    errEl.classList.remove('hidden');
+  }
+};
+
+window.deleteMlContact = async function (id) {
+  if (!confirm('حذف جهة الاتصال هذه؟')) return;
+  await axios.delete(`${API}/message-contacts/${id}`);
+  renderMessageListsBody();
+};
+
+// ---- List modal ----
+window.openMlListModal = async function (id) {
+  let list = null, recipientIds = [];
+  if (id) {
+    const { data } = await axios.get(`${API}/message-lists/${id}`);
+    list = data.list;
+    recipientIds = (data.recipients || []).map(r => r.id);
+  }
+  const l = list || { name: '', message_type: '', message_text: '', schedule_time: '19:00', recurrence: 'daily', schedule_days: null, target_region: '', is_active: 1 };
+  let days = [];
+  try { days = l.schedule_days ? JSON.parse(l.schedule_days) : []; } catch { days = []; }
+
+  const weekDays = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+
+  const modal = document.getElementById('modal-root');
+  modal.innerHTML = `
+    <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <h3 class="font-bold text-lg mb-4">${list ? 'تعديل قائمة رسائل' : 'قائمة رسائل جديدة'}</h3>
+        <div class="space-y-3">
+          <input id="ml-name" value="${l.name}" placeholder="اسم القائمة (مثال: قائمة وكلاء الجوازات)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="ml-type" value="${l.message_type || ''}" placeholder="نوع الرسالة (اختياري، مثال: تسويقي)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <textarea id="ml-text" rows="4" placeholder="نص الرسالة" class="w-full border border-gray-200 rounded-xl px-4 py-2.5">${l.message_text}</textarea>
+          <div class="grid grid-cols-2 gap-3">
+            <input id="ml-time" type="time" value="${l.schedule_time}" class="border border-gray-200 rounded-xl px-4 py-2.5" />
+            <select id="ml-recurrence" onchange="updateMlDaysUI()" class="border border-gray-200 rounded-xl px-4 py-2.5">
+              <option value="daily" ${l.recurrence === 'daily' ? 'selected' : ''}>يومي</option>
+              <option value="weekly" ${l.recurrence === 'weekly' ? 'selected' : ''}>أسبوعي</option>
+              <option value="monthly" ${l.recurrence === 'monthly' ? 'selected' : ''}>شهري</option>
+            </select>
+          </div>
+          <div id="ml-days-box">
+            ${l.recurrence === 'weekly' ? `<div class="grid grid-cols-4 gap-1.5">${weekDays.map((d, i) => `<label class="flex items-center gap-1.5 bg-gray-50 rounded-lg px-2 py-1.5 text-xs cursor-pointer"><input type="checkbox" class="ml-day-cb" value="${i}" ${days.includes(i) ? 'checked' : ''}/> ${d}</label>`).join('')}</div>` : ''}
+            ${l.recurrence === 'monthly' ? `<input id="ml-monthdays" value="${days.join(', ')}" placeholder="أيام الشهر مفصولة بفاصلة (مثال: 1, 15)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />` : ''}
+          </div>
+          <input id="ml-region" value="${l.target_region || ''}" placeholder="استهداف منطقة تلقائياً (اختياري، مثال: صنعاء)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <div>
+            <p class="text-xs font-bold text-gray-500 mb-2">مستلمون محددون يدوياً (بالإضافة لمن تشمله المنطقة أعلاه)</p>
+            <div class="grid grid-cols-2 gap-1.5 max-h-32 overflow-y-auto bg-gray-50 rounded-xl p-2">
+              ${mlContactsCache.map(ct => `<label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" class="ml-recipient-cb" value="${ct.id}" ${recipientIds.includes(ct.id) ? 'checked' : ''}/> ${ct.name}</label>`).join('') || '<p class="text-gray-400 text-xs col-span-2">أضف جهات اتصال أولاً</p>'}
+            </div>
+          </div>
+          <label class="flex items-center gap-2 text-sm"><input id="ml-active" type="checkbox" ${l.is_active ? 'checked' : ''}/> القائمة نشطة (مجدولة للإرسال التلقائي)</label>
+        </div>
+        <div id="ml-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-3"></div>
+        <div class="flex gap-3 mt-5">
+          <button onclick="submitMlList(${id || 'null'})" class="flex-1 bg-brand-600 text-white font-bold py-2.5 rounded-xl">حفظ</button>
+          <button onclick="document.getElementById('modal-root').innerHTML=''" class="flex-1 bg-gray-100 text-gray-700 font-bold py-2.5 rounded-xl">إلغاء</button>
+        </div>
+      </div>
+    </div>
+  `;
+};
+
+window.updateMlDaysUI = function () {
+  const recurrence = document.getElementById('ml-recurrence').value;
+  const box = document.getElementById('ml-days-box');
+  const weekDays = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+  if (recurrence === 'weekly') {
+    box.innerHTML = `<div class="grid grid-cols-4 gap-1.5">${weekDays.map((d, i) => `<label class="flex items-center gap-1.5 bg-gray-50 rounded-lg px-2 py-1.5 text-xs cursor-pointer"><input type="checkbox" class="ml-day-cb" value="${i}"/> ${d}</label>`).join('')}</div>`;
+  } else if (recurrence === 'monthly') {
+    box.innerHTML = `<input id="ml-monthdays" placeholder="أيام الشهر مفصولة بفاصلة (مثال: 1, 15)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />`;
+  } else {
+    box.innerHTML = '';
+  }
+};
+
+window.submitMlList = async function (id) {
+  const recurrence = document.getElementById('ml-recurrence').value;
+  let schedule_days = [];
+  if (recurrence === 'weekly') {
+    schedule_days = Array.from(document.querySelectorAll('.ml-day-cb:checked')).map(cb => Number(cb.value));
+  } else if (recurrence === 'monthly') {
+    const raw = document.getElementById('ml-monthdays')?.value || '';
+    schedule_days = raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isInteger(n));
+  }
+  const recipient_contact_ids = Array.from(document.querySelectorAll('.ml-recipient-cb:checked')).map(cb => Number(cb.value));
+  const payload = {
+    name: document.getElementById('ml-name').value.trim(),
+    message_type: document.getElementById('ml-type').value.trim() || null,
+    message_text: document.getElementById('ml-text').value.trim(),
+    schedule_time: document.getElementById('ml-time').value,
+    recurrence,
+    schedule_days,
+    target_region: document.getElementById('ml-region').value.trim() || null,
+    is_active: document.getElementById('ml-active').checked,
+    recipient_contact_ids
+  };
+  const errEl = document.getElementById('ml-error');
+  try {
+    if (id) await axios.put(`${API}/message-lists/${id}`, payload);
+    else await axios.post(`${API}/message-lists`, payload);
+    document.getElementById('modal-root').innerHTML = '';
+    renderMessageListsBody();
+  } catch (err) {
+    if (guardAuth(err)) return;
+    errEl.textContent = err?.response?.data?.error || 'حدث خطأ';
+    errEl.classList.remove('hidden');
+  }
+};
+
+window.deleteMlList = async function (id) {
+  if (!confirm('حذف هذه القائمة نهائياً؟')) return;
+  await axios.delete(`${API}/message-lists/${id}`);
+  renderMessageListsBody();
+};
+
+window.sendMlListNow = async function (id) {
+  if (!confirm('إرسال هذه القائمة الآن لكل مستلميها؟')) return;
+  try {
+    const { data } = await axios.post(`${API}/message-lists/${id}/send-now`);
+    alert(`تم وضع الرسالة في قائمة الإرسال لـ ${data.recipients} مستلم`);
+    renderMessageListsBody();
+  } catch (err) {
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
 
 window.saveSettings = async function () {
   const cumulativeFields = Array.from(document.querySelectorAll('.cum-field-cb:checked')).map(cb => cb.value);
