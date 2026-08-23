@@ -44,20 +44,21 @@ export async function handleTextCommand(
     const featureNameAr = namesAr[cmd.feature]
     const featureNameEn = namesEn[cmd.feature]
 
-    // Auto-extract has an extra nuance worth mentioning in the confirmation
-    // itself: disabling it changes what happens to future images (queued
-    // instead of processed immediately), and re-enabling it does NOT
-    // retroactively process anything already queued (still needs "استخراج").
+    // By explicit user decision on 2026-08-23, extraction itself ALWAYS runs
+    // immediately in the background regardless of this toggle — it only
+    // controls whether the detailed "✅ تم استخراج بيانات الجواز بنجاح..."
+    // reply is sent back into this conversation. The cumulative list (its
+    // own separate "تفعيل القائمة" toggle) is unaffected either way.
     if (cmd.feature === 'auto_extract') {
       return {
         kind: 'text',
         text: cmd.enabled
           ? (lang === 'en'
-              ? '✅ Auto-extract enabled — new passport photos will be processed immediately again.'
-              : '✅ تم تفعيل الاستخراج التلقائي — سيتم استخراج بيانات أي صورة جواز جديدة فوراً عند استلامها.')
+              ? '✅ Detailed result replies enabled — you will now receive the full extracted data for every passport photo.'
+              : '✅ تم تفعيل رد الاستخراج التفصيلي — سيصلك الآن تفاصيل بيانات الجواز كاملة مع كل صورة جديدة.')
           : (lang === 'en'
-              ? '✅ Auto-extract disabled — new passport photos will be queued instead of processed immediately. Send "استخراج" anytime to process everything queued so far.'
-              : '✅ تم إلغاء الاستخراج التلقائي — سيتم حفظ أي صورة جواز جديدة بانتظار الاستخراج بدل معالجتها فوراً. أرسل "استخراج" في أي وقت لمعالجة كل الصور المنتظرة دفعة واحدة.')
+              ? '✅ Detailed result replies disabled — passport photos are still processed and saved automatically on the platform, just without a reply here for each one. Send "تفعيل الاستخراج التلقائي" anytime to bring the detailed reply back.'
+              : '✅ تم إلغاء رد الاستخراج التفصيلي — استخراج بيانات الجواز يستمر تلقائياً ويُحفظ بالمنصة كالمعتاد، فقط بدون إرسال رد تفصيلي هنا لكل صورة. أرسل "تفعيل الاستخراج التلقائي" في أي وقت لإعادة الرد التفصيلي.')
       }
     }
 

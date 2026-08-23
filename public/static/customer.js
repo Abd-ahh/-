@@ -91,6 +91,7 @@ async function render() {
     if (currentTab === 'overview') await renderOverview(area);
     else if (currentTab === 'numbers') await renderNumbers(area);
     else if (currentTab === 'operations') await renderOperations(area);
+    else if (currentTab === 'cumulative') await renderCumulativeLists(area);
     else if (currentTab === 'settings') await renderSettings(area);
   } catch (err) {
     if (guardAuth(err)) return;
@@ -305,6 +306,73 @@ async function renderOperations(area) {
   `;
 }
 
+// Feature 2 (cumulative running list): the numbered list is now built
+// automatically in the background on every successful extraction, but by
+// default no WhatsApp reply is sent for it (office must explicitly enable
+// "تفعيل الاستخراج التلقائي" for the detailed WhatsApp reply). This tab is
+// where the office reads the up-to-date list instead — one card per active
+// conversation (private number / shared-number sender / linked group),
+// each copyable in one click.
+function buildCumulativeListText(items, fields) {
+  if (!items.length) return '(فارغة)';
+  return items.map((item, idx) => {
+    const parts = fields.map(f => item[f.key]).filter(Boolean);
+    return `${idx + 1}- ${parts.join(' - ')}`;
+  }).join('\n');
+}
+
+async function renderCumulativeLists(area) {
+  const [{ data }, fields] = await Promise.all([
+    axios.get(`${API}/cumulative-lists`),
+    getFields()
+  ]);
+  const fieldDefs = fields.filter(f => data.fields.includes(f.key));
+
+  if (!data.lists.length) {
+    area.innerHTML = `
+      <div class="bg-white rounded-2xl border border-gray-100 p-10 text-center text-gray-400">
+        <i class="fa-solid fa-list-ol text-3xl mb-3"></i>
+        <p>لا توجد قائمة تراكمية نشطة حالياً.</p>
+        <p class="text-xs mt-2">تُبنى القائمة تلقائياً مع كل جواز يُستخرج بنجاح، بشرط إرسال أمر "تفعيل القائمة" في المحادثة/المجموعة المطلوبة أولاً.</p>
+      </div>`;
+    return;
+  }
+
+  area.innerHTML = `
+    <div class="space-y-4">
+      ${data.lists.map((l, i) => `
+        <div class="bg-white rounded-2xl border border-gray-100 p-6">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <h3 class="font-bold text-gray-800">${l.label}</h3>
+              <p class="text-xs text-gray-400 mt-0.5">${l.items.length} جواز · آخر تحديث: ${fmtDate(l.updated_at)}</p>
+            </div>
+            <button onclick="copyCumulativeList(${i}, this)" class="bg-brand-50 hover:bg-brand-100 text-brand-700 font-bold text-xs px-4 py-2 rounded-lg">
+              <i class="fa-regular fa-copy ml-1"></i> نسخ القائمة كاملة
+            </button>
+          </div>
+          <ol class="space-y-1.5 text-sm">
+            ${l.items.map((item, idx) => `
+              <li class="flex items-center gap-2 text-gray-700">
+                <span class="text-gray-400 font-bold">${idx + 1}-</span>
+                <span>${fieldDefs.map(f => item[f.key]).filter(Boolean).join(' - ') || '-'}</span>
+              </li>`).join('')}
+          </ol>
+        </div>`).join('')}
+    </div>
+  `;
+
+  window._cumulativeListsData = data.lists;
+  window._cumulativeListFields = fieldDefs;
+}
+
+window.copyCumulativeList = function (idx, btnEl) {
+  const list = window._cumulativeListsData?.[idx];
+  const fields = window._cumulativeListFields || [];
+  if (!list) return;
+  copyValue(buildCumulativeListText(list.items, fields), btnEl);
+};
+
 async function renderSettings(area) {
   const { data } = await axios.get(`${API}/me`);
   const c = data.customer;
@@ -350,7 +418,7 @@ async function renderSettings(area) {
 
       <hr class="my-6" />
       <h3 class="font-bold text-lg mb-2">القائمة التراكمية</h3>
-      <p class="text-xs text-gray-400 mb-4">بعد كل جواز يتم استخراجه، يُرسَل تلقائياً في نفس المحادثة قائمة تراكمية مرقّمة بكل الجوازات السابقة (يمكن أيضاً طلبها بكتابة "القائمة"). اختر الحقول التي تريد ظهورها في القائمة، ومتى تُصفَّر تلقائياً.</p>
+      <p class="text-xs text-gray-400 mb-4">بعد إرسال أمر "تفعيل القائمة" في المحادثة/المجموعة، تُبنى قائمة تراكمية مرقّمة تلقائياً وتُرسَل كرسالة واتساب في نفس المحادثة مع كل جواز يُستخرج بنجاح — هذا يعمل دائماً بشكل مستقل تماماً عن إعداد "الاستخراج التلقائي" أعلاه. يمكنك أيضاً مراجعة ونسخ القائمة من تبويب "القائمة التراكمية" في أعلى الصفحة، أو طلبها في أي وقت بكتابة "القائمة" داخل المحادثة نفسها. اختر الحقول التي تريد ظهورها في القائمة، ومتى تُصفَّر تلقائياً.</p>
       <div class="space-y-4">
         <div>
           <label class="block text-sm font-bold text-gray-700 mb-2">الحقول الظاهرة في القائمة</label>

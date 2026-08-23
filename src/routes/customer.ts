@@ -1,7 +1,8 @@
 import { Hono } from 'hono'
 import { requireCustomer } from '../lib/middleware'
 import { AVAILABLE_FIELDS, normalizeExtractionFields } from '../lib/fields'
-import { normalizeCumulativeFields } from '../lib/cumulative'
+import { normalizeCumulativeFields, parseCumulativeFields } from '../lib/cumulative'
+import { parseConversationKey } from '../lib/commands'
 import type { AppEnv } from '../lib/types'
 
 const customer = new Hono<AppEnv>()
@@ -159,6 +160,58 @@ customer.put('/settings', async (c) => {
     'UPDATE customers SET reply_language=?, welcome_message=?, phone=?, activation_code=?, deactivation_code=?, cumulative_list_fields=?, cumulative_list_reset_hours=? WHERE id=?'
   ).bind(reply_language || 'ar', welcome_message || null, phone || null, actCode, deactCode, cumulativeFields, resetHours, id).run()
   return c.json({ success: true })
+})
+
+// Feature 2 (cumulative running list): now the ONLY place this list is
+// visible when the office hasn't turned on the detailed "استخراج تلقائي"
+// WhatsApp reply — the numbered list itself is still built automatically
+// on every successful extraction (see appendToCumulativeList in
+// webhook.ts), but by default it's read here in the portal instead of
+// being sent as a WhatsApp message. Returns every active (non-expired)
+// list for this office across all its conversations (private numbers,
+// shared-number sessions, and linked groups), each with a human-readable
+// label for the conversation and the resolved field list/labels so the
+// frontend doesn't need its own copy of AVAILABLE_FIELDS logic beyond the
+// emoji/label lookup already exposed via GET /fields.
+customer.get('/cumulative-lists', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+
+  const cust = await DB.prepare('SELECT cumulative_list_fields, cumulative_list_reset_hours FROM customers WHERE id = ?')
+    .bind(id).first<{ cumulative_list_fields: string | null; cumulative_list_reset_hours: number }>()
+  const fieldKeys = parseCumulativeFields(cust?.cumulative_list_fields)
+  const resetHours = cust?.cumulative_list_reset_hours ?? 24
+
+  const rows = await DB.prepare(
+    'SELECT * FROM cumulative_lists WHERE customer_id = ? ORDER BY updated_at DESC'
+  ).bind(id).all<any>()
+
+  const lists: { conversation_key: string; label: string; items: any[]; started_at: string; updated_at: string }[] = []
+
+  for (const row of rows.results || []) {
+    const ageHours = (Date.now() - new Date(row.started_at + 'Z').getTime()) / (1000 * 60 * 60)
+    if (ageHours >= resetHours) continue // expired — same rule as getCumulativeList, don't show a stale list
+
+    let items: any[] = []
+    try { items = JSON.parse(row.items_json) || [] } catch { items = [] }
+    if (items.length === 0) continue
+
+    // Resolve a human-readable label for this conversation instead of the
+    // raw internal key ("wn:3:9665..." / "grp:1203...@g.us").
+    let label = row.conversation_key
+    const parsed = parseConversationKey(row.conversation_key)
+    if (parsed?.channel === 'group') {
+      const g = await DB.prepare('SELECT group_name FROM whatsapp_groups WHERE group_jid = ? AND customer_id = ?')
+        .bind(parsed.group_jid, id).first<{ group_name: string | null }>()
+      label = g?.group_name ? `📱 مجموعة: ${g.group_name}` : `📱 مجموعة واتساب`
+    } else if (parsed?.channel === 'number') {
+      label = `☎️ ${parsed.sender_phone}`
+    }
+
+    lists.push({ conversation_key: row.conversation_key, label, items, started_at: row.started_at, updated_at: row.updated_at })
+  }
+
+  return c.json({ fields: fieldKeys, lists })
 })
 
 customer.get('/operations', async (c) => {

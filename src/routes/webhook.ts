@@ -351,21 +351,24 @@ async function handleIncomingMessage(params: {
     return
   }
 
-  // Feature 6 (Auto-Extract toggle, migration 0009, default DISABLED): when
-  // disabled, queue this image instead of processing it immediately — no
-  // Gemini call, no quota deduction, and (by user request) NO confirmation
-  // reply either, so sending several images in a row stays completely silent
-  // instead of spamming a "received and queued" message per photo. The
-  // office sends "استخراج" whenever it wants to process everything queued
-  // for this conversation in one batch, or "تفعيل الاستخراج التلقائي" to
-  // go back to immediate per-image replies.
-  if (!customer?.feature_auto_extract_enabled) {
-    await DB.prepare(
-      `INSERT INTO pending_extractions (customer_id, conversation_key, channel, whatsapp_number_id, sender_phone, media_id, mime_type)
-       VALUES (?, ?, 'number', ?, ?, ?, ?)`
-    ).bind(customerId, conversationKey, numberRow.id, senderPhone, msg.image.id, msg.image.mime_type || 'image/jpeg').run()
-    return
-  }
+  // Feature 6 (Auto-Extract toggle, migration 0009): by explicit user
+  // decision on 2026-08-23, extraction ALWAYS runs immediately for every
+  // incoming image — it is the platform's own job, not something an office
+  // should have to trigger manually. This toggle now controls ONLY whether
+  // the detailed "✅ تم استخراج بيانات الجواز بنجاح..." result text is sent
+  // back into the conversation (default DISABLED = stay silent on success;
+  // the extraction + cumulative-list update still happen in the background
+  // regardless). Warning/error replies (not a passport / unclear / failed)
+  // are NEVER gated by this toggle — the sender needs to know to retry.
+  // See the `feature_auto_extract_enabled` check further below, right
+  // before T.result is sent.
+  //
+  // NOTE: `pending_extractions` / "استخراج" (batch mode) is legacy from an
+  // earlier design where disabling this toggle queued images instead of
+  // extracting them. No NEW rows are inserted here anymore, but the queue
+  // drain path (runExtractionBatch, the "استخراج" command) is kept so any
+  // rows created before this change can still be processed by offices that
+  // already had images queued.
 
   // Create operation row (processing)
   const opInsert = await DB.prepare(
@@ -442,13 +445,16 @@ async function handleIncomingMessage(params: {
     ])
 
     // Extraction succeeded and is already persisted + quota already
-    // incremented above. If sending the reply itself fails (WhatsApp API
-    // error, e.g. recipient not in the allowed list on a test number),
-    // that must NOT be reported back to the user as a processing error —
-    // the operation record correctly shows 'success' either way.
-    await sendTextMessage(phoneNumberId, accessToken, senderPhone, T.result(extraction), WHATSAPP_API_VERSION).catch((err) =>
-      console.error('sendTextMessage (result) failed', err)
-    )
+    // incremented above. Feature 6 toggle (default DISABLED) controls ONLY
+    // this detailed result text — sending it is best-effort either way (a
+    // WhatsApp API error here, e.g. recipient not in the allowed list on a
+    // test number, must NOT be reported back to the user as a processing
+    // error; the operation record correctly shows 'success' regardless).
+    if (customer?.feature_auto_extract_enabled) {
+      await sendTextMessage(phoneNumberId, accessToken, senderPhone, T.result(extraction), WHATSAPP_API_VERSION).catch((err) =>
+        console.error('sendTextMessage (result) failed', err)
+      )
+    }
 
     // Cumulative running list (feature 2): append this extraction and
     // resend the updated numbered list, best-effort (must not affect the
@@ -710,21 +716,12 @@ webhook.post('/bridge/message', async (c) => {
 
   const groupConversationKey = buildConversationKey({ group_jid })
 
-  // Feature 6 (Auto-Extract toggle, migration 0009, default DISABLED): when
-  // disabled, queue this image instead of processing it immediately — no
-  // Gemini call, no quota deduction, and (by user request) NO confirmation
-  // reply either, so a batch of images sent to the group stays completely
-  // silent instead of spamming a "received and queued" reply per photo.
-  // Send "استخراج" in the group whenever ready to process everything queued
-  // in one batch, or "تفعيل الاستخراج التلقائي" for immediate per-image replies.
-  if (!customer?.feature_auto_extract_enabled) {
-    await DB.prepare(
-      `INSERT INTO pending_extractions (customer_id, conversation_key, channel, group_jid, sender_jid, image_base64, mime_type)
-       VALUES (?, ?, 'group', ?, ?, ?, ?)`
-    ).bind(customerId, groupConversationKey, group_jid, sender_jid, image_base64, mime_type || 'image/jpeg').run()
-
-    return c.json({})
-  }
+  // Feature 6 (Auto-Extract toggle, migration 0009): by explicit user
+  // decision on 2026-08-23, extraction ALWAYS runs immediately for every
+  // incoming group image — see the matching comment in the private/shared-
+  // number handler above for the full rationale. This toggle now only
+  // gates the detailed result text sent below (default DISABLED = silent
+  // on success; warning/error replies are never gated by it).
 
   const opInsert = await DB.prepare(
     `INSERT INTO operations (customer_id, sender_phone, group_jid, status, source)
@@ -773,7 +770,12 @@ webhook.post('/bridge/message', async (c) => {
       DB.prepare('UPDATE subscriptions SET operations_used = operations_used + 1 WHERE id = ?').bind(activeSub.id)
     ])
 
-    let reply = T.result(extraction)
+    // Feature 6 toggle (default DISABLED) controls ONLY this detailed result
+    // text — the extraction itself already ran and was persisted above
+    // regardless of this flag. Starts empty; the cumulative-list text below
+    // is appended independently (its own "تفعيل القائمة" flag, unrelated to
+    // this one) so it still reaches the group even when this is off.
+    let reply = customer?.feature_auto_extract_enabled ? T.result(extraction) : ''
 
     // Cumulative running list (feature 2) + periodic Umrah visa auto-check
     // (feature 4): same behavior as the private/shared-number path, but this
@@ -785,7 +787,7 @@ webhook.post('/bridge/message', async (c) => {
         const fieldKeys = parseCumulativeFields(customer?.cumulative_list_fields)
         const resetHours = customer?.cumulative_list_reset_hours ?? 24
         const items = await appendToCumulativeList(DB, customerId, groupConversationKey, resetHours, fieldKeys, extraction)
-        reply += '\n\n' + buildCumulativeListMessage(items, lang, fieldKeys)
+        reply += (reply ? '\n\n' : '') + buildCumulativeListMessage(items, lang, fieldKeys)
       } catch (err) {
         console.error('Cumulative list update failed (group)', err)
       }
@@ -804,7 +806,10 @@ webhook.post('/bridge/message', async (c) => {
       }
     }
 
-    return c.json({ reply })
+    // Both feature 6 (detailed result) and feature 2 (cumulative list) may
+    // be disabled at once, leaving `reply` empty — stay silent rather than
+    // sending a blank message into the group.
+    return reply ? c.json({ reply }) : c.json({})
   } catch (err: any) {
     console.error('Group passport processing error', err)
     await DB.prepare(`UPDATE operations SET status='failed', error_message=? WHERE id=?`)
