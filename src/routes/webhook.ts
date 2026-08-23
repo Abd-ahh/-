@@ -353,21 +353,17 @@ async function handleIncomingMessage(params: {
 
   // Feature 6 (Auto-Extract toggle, migration 0009, default DISABLED): when
   // disabled, queue this image instead of processing it immediately — no
-  // Gemini call, no quota deduction. The office sends "استخراج" whenever it
-  // wants to process everything queued for this conversation in one batch.
+  // Gemini call, no quota deduction, and (by user request) NO confirmation
+  // reply either, so sending several images in a row stays completely silent
+  // instead of spamming a "received and queued" message per photo. The
+  // office sends "استخراج" whenever it wants to process everything queued
+  // for this conversation in one batch, or "تفعيل الاستخراج التلقائي" to
+  // go back to immediate per-image replies.
   if (!customer?.feature_auto_extract_enabled) {
     await DB.prepare(
       `INSERT INTO pending_extractions (customer_id, conversation_key, channel, whatsapp_number_id, sender_phone, media_id, mime_type)
        VALUES (?, ?, 'number', ?, ?, ?, ?)`
     ).bind(customerId, conversationKey, numberRow.id, senderPhone, msg.image.id, msg.image.mime_type || 'image/jpeg').run()
-
-    await sendTextMessage(
-      phoneNumberId, accessToken, senderPhone,
-      lang === 'en'
-        ? '📥 Image received and queued. Send "استخراج" to process all queued images now.'
-        : '📥 تم استلام الصورة وحفظها بانتظار الاستخراج. أرسل "استخراج" لمعالجة كل الصور المنتظرة الآن.',
-      WHATSAPP_API_VERSION
-    ).catch(() => {})
     return
   }
 
@@ -716,19 +712,18 @@ webhook.post('/bridge/message', async (c) => {
 
   // Feature 6 (Auto-Extract toggle, migration 0009, default DISABLED): when
   // disabled, queue this image instead of processing it immediately — no
-  // Gemini call, no quota deduction. Send "استخراج" in the group whenever
-  // ready to process everything queued in one batch.
+  // Gemini call, no quota deduction, and (by user request) NO confirmation
+  // reply either, so a batch of images sent to the group stays completely
+  // silent instead of spamming a "received and queued" reply per photo.
+  // Send "استخراج" in the group whenever ready to process everything queued
+  // in one batch, or "تفعيل الاستخراج التلقائي" for immediate per-image replies.
   if (!customer?.feature_auto_extract_enabled) {
     await DB.prepare(
       `INSERT INTO pending_extractions (customer_id, conversation_key, channel, group_jid, sender_jid, image_base64, mime_type)
        VALUES (?, ?, 'group', ?, ?, ?, ?)`
     ).bind(customerId, groupConversationKey, group_jid, sender_jid, image_base64, mime_type || 'image/jpeg').run()
 
-    return c.json({
-      reply: lang === 'en'
-        ? '📥 Image received and queued. Send "استخراج" to process all queued images now.'
-        : '📥 تم استلام الصورة وحفظها بانتظار الاستخراج. أرسل "استخراج" لمعالجة كل الصور المنتظرة الآن.'
-    })
+    return c.json({})
   }
 
   const opInsert = await DB.prepare(
