@@ -9,6 +9,11 @@ import { reportDateRange, buildReportTextMessage, buildReportHtml, VisaReportRow
 export type CommandOutcome =
   | { kind: 'text'; text: string }
   | { kind: 'pdf_report'; html: string; filename: string }
+  // Signals the caller (webhook.ts) to run the queued-images batch
+  // extraction pipeline itself — that pipeline needs GEMINI_API_KEY, R2,
+  // and channel-specific delivery (direct WhatsApp send vs. a single
+  // bridge reply string), none of which this module has access to.
+  | { kind: 'run_extraction_batch' }
 
 export async function handleTextCommand(
   DB: D1Database,
@@ -22,11 +27,36 @@ export async function handleTextCommand(
   if (!cmd) return null
 
   if (cmd.type === 'toggle_feature') {
-    const column = cmd.feature === 'cumulative_list' ? 'feature_cumulative_list_enabled' : 'feature_visa_check_enabled'
+    const columnByFeature: Record<string, string> = {
+      cumulative_list: 'feature_cumulative_list_enabled',
+      visa_check: 'feature_visa_check_enabled',
+      auto_extract: 'feature_auto_extract_enabled'
+    }
+    const column = columnByFeature[cmd.feature]
     await DB.prepare(`UPDATE customers SET ${column} = ? WHERE id = ?`).bind(cmd.enabled ? 1 : 0, customerId).run()
 
-    const featureNameAr = cmd.feature === 'cumulative_list' ? 'القائمة التراكمية' : 'فحص التأشيرة'
-    const featureNameEn = cmd.feature === 'cumulative_list' ? 'the cumulative list' : 'the visa auto-check'
+    const namesAr: Record<string, string> = { cumulative_list: 'القائمة التراكمية', visa_check: 'فحص التأشيرة', auto_extract: 'الاستخراج التلقائي' }
+    const namesEn: Record<string, string> = { cumulative_list: 'the cumulative list', visa_check: 'the visa auto-check', auto_extract: 'auto-extract' }
+    const featureNameAr = namesAr[cmd.feature]
+    const featureNameEn = namesEn[cmd.feature]
+
+    // Auto-extract has an extra nuance worth mentioning in the confirmation
+    // itself: disabling it changes what happens to future images (queued
+    // instead of processed immediately), and re-enabling it does NOT
+    // retroactively process anything already queued (still needs "استخراج").
+    if (cmd.feature === 'auto_extract') {
+      return {
+        kind: 'text',
+        text: cmd.enabled
+          ? (lang === 'en'
+              ? '✅ Auto-extract enabled — new passport photos will be processed immediately again.'
+              : '✅ تم تفعيل الاستخراج التلقائي — سيتم استخراج بيانات أي صورة جواز جديدة فوراً عند استلامها.')
+          : (lang === 'en'
+              ? '✅ Auto-extract disabled — new passport photos will be queued instead of processed immediately. Send "استخراج" anytime to process everything queued so far.'
+              : '✅ تم إلغاء الاستخراج التلقائي — سيتم حفظ أي صورة جواز جديدة بانتظار الاستخراج بدل معالجتها فوراً. أرسل "استخراج" في أي وقت لمعالجة كل الصور المنتظرة دفعة واحدة.')
+      }
+    }
+
     return {
       kind: 'text',
       text: cmd.enabled
@@ -80,6 +110,23 @@ export async function handleTextCommand(
         ? '🔄 Got it, checking the visa status now — you will receive the PDF here as soon as it is ready.'
         : '🔄 تم، جاري فحص حالة التأشيرة الآن — سيصلك ملف PDF هنا فوراً عند جهوزيتها.'
     }
+  }
+
+  if (cmd.type === 'extract_now') {
+    const pending = await DB.prepare(
+      `SELECT id FROM pending_extractions WHERE customer_id = ? AND conversation_key = ? AND status = 'queued'`
+    ).bind(customerId, conversationKey).all<{ id: number }>()
+
+    if (!pending.results || pending.results.length === 0) {
+      return {
+        kind: 'text',
+        text: lang === 'en'
+          ? '⚠️ No images are currently queued for this conversation.'
+          : '⚠️ لا توجد صور منتظرة للاستخراج في هذه المحادثة حالياً.'
+      }
+    }
+
+    return { kind: 'run_extraction_batch' }
   }
 
   if (cmd.type === 'list') {

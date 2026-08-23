@@ -10,6 +10,7 @@ import { handleTextCommand } from '../lib/commandHandlers'
 import { appendToCumulativeList, buildCumulativeListMessage, parseCumulativeFields } from '../lib/cumulative'
 import { getSetting, UNACTIVATED_WELCOME_KEY } from '../lib/settings'
 import { deliverToConversation } from '../lib/deliver'
+import { runExtractionBatch } from '../lib/extractionBatch'
 
 const SHARED_SESSION_DAYS = 30
 
@@ -24,6 +25,12 @@ const DEFAULT_WELCOME_MESSAGE = '👋 أهلاً وسهلاً! لتفعيل ال
 // was previously 180min initial delay / 20min retry interval).
 const VISA_CHECK_INITIAL_DELAY_MIN = 30
 const VISA_CHECK_RETRY_INTERVAL_MIN = 30
+
+// Feature 6 (Auto-Extract toggle, migration 0009): safety cap on how many
+// queued images a single "استخراج" command processes in one call, to keep
+// the request within a reasonable execution time. Any remainder stays
+// queued and the summary message tells the user to send "استخراج" again.
+const MAX_EXTRACTION_BATCH_SIZE = 15
 
 const webhook = new Hono<AppEnv>()
 

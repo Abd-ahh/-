@@ -5,11 +5,12 @@
 // can be added here without touching the office-matching logic.
 import { normalizeArabicText } from './office'
 
-export type ToggleableFeature = 'cumulative_list' | 'visa_check'
+export type ToggleableFeature = 'cumulative_list' | 'visa_check' | 'auto_extract'
 
 export type ParsedCommand =
   | { type: 'check_now' }
   | { type: 'list' }
+  | { type: 'extract_now' }
   | { type: 'report'; period: 'daily' | 'monthly' | 'yearly'; format: 'text' | 'pdf' }
   | { type: 'suggestion'; text: string }
   | { type: 'toggle_feature'; feature: ToggleableFeature; enabled: boolean }
@@ -17,6 +18,12 @@ export type ParsedCommand =
 
 const CHECK_NOW_PHRASES = ['فحص التاشيره', 'فحص التأشيرة', 'فحص الفيزا', 'تحقق من التاشيره', 'تحقق التاشيره']
 const LIST_PHRASES = ['القائمه', 'القائمة', 'قائمه الاسماء', 'قائمة الأسماء']
+// "استخراج" processes every queued/pending image for this conversation in
+// one batch, right now (feature 6 — Auto-Extract toggle). Only meaningful
+// when feature_auto_extract_enabled=0 (images are queued instead of
+// processed on receipt), but works regardless — if nothing is queued it
+// just replies with a "nothing pending" message.
+const EXTRACT_NOW_PHRASES = ['استخراج', 'استخراج الان', 'استخراج الآن']
 
 // Fixed (non-customizable) per-feature enable/disable commands. Unlike the
 // office-level activation/deactivation codes (office.ts), these are the
@@ -30,6 +37,12 @@ const DISABLE_LIST_PHRASES = ['الغاء القائمة', 'إلغاء القا�
 // already using the old commands (e.g. مكتب النور) are unaffected.
 const ENABLE_VISACHECK_PHRASES = ['تفعيل فحص التاشيره', 'تفعيل فحص التأشيرة', 'فحص دوري']
 const DISABLE_VISACHECK_PHRASES = ['الغاء فحص التاشيره', 'إلغاء فحص التاشيره', 'الغاء فحص التأشيرة', 'إلغاء فحص التأشيرة', 'الغاء الفحص الدوري', 'إلغاء الفحص الدوري']
+// Feature 6: Auto-Extract toggle. Default DISABLED for all offices (see
+// migration 0009) — while disabled, incoming images are queued instead of
+// processed immediately; "تفعيل الاستخراج التلقائي" restores the original
+// immediate-processing behavior.
+const ENABLE_AUTOEXTRACT_PHRASES = ['تفعيل الاستخراج التلقائي', 'تفعيل الاستخراج الالي', 'تفعيل الاستخراج الآلي']
+const DISABLE_AUTOEXTRACT_PHRASES = ['الغاء الاستخراج التلقائي', 'إلغاء الاستخراج التلقائي', 'الغاء الاستخراج الالي', 'إلغاء الاستخراج الآلي']
 
 export function parseCommand(rawText: string): ParsedCommand {
   const text = (rawText || '').trim()
@@ -50,6 +63,12 @@ export function parseCommand(rawText: string): ParsedCommand {
   if (DISABLE_VISACHECK_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {
     return { type: 'toggle_feature', feature: 'visa_check', enabled: false }
   }
+  if (ENABLE_AUTOEXTRACT_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {
+    return { type: 'toggle_feature', feature: 'auto_extract', enabled: true }
+  }
+  if (DISABLE_AUTOEXTRACT_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {
+    return { type: 'toggle_feature', feature: 'auto_extract', enabled: false }
+  }
 
   if (CHECK_NOW_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {
     return { type: 'check_now' }
@@ -57,6 +76,10 @@ export function parseCommand(rawText: string): ParsedCommand {
 
   if (LIST_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {
     return { type: 'list' }
+  }
+
+  if (EXTRACT_NOW_PHRASES.some((p) => normalizeArabicText(p) === normalized)) {
+    return { type: 'extract_now' }
   }
 
   // "تقرير يومي" | "تقرير شهري" | "تقرير سنوي" (+ optional "pdf"/"مستند" suffix)
