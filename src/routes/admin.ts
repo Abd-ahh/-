@@ -625,6 +625,43 @@ admin.put('/suggestions/:id', async (c) => {
   return c.json({ success: true })
 })
 
+// ---------------------- Activation/deactivation commands overview ----------------------
+// Read-only reference view for the admin: which text command activates or
+// deactivates each office on the platform's shared WhatsApp number (custom
+// command if the office set one, otherwise the auto-derived default "<اسم
+// المكتب> تفعيل" pattern — see src/lib/office.ts / webhook.ts for the actual
+// matching logic). Also surfaces how many end-user sessions are currently
+// linked to each office so the admin can gauge real usage at a glance.
+// Only customers on a 'shared'-mode package are relevant here — customers
+// on a 'private' package have their own dedicated number and never need an
+// activation command at all.
+admin.get('/activation-commands', async (c) => {
+  const { DB } = c.env
+  const result = await DB.prepare(
+    `SELECT DISTINCT cu.id, cu.name, cu.activation_code, cu.deactivation_code,
+       (SELECT COUNT(*) FROM shared_number_sessions sess
+          WHERE sess.customer_id = cu.id AND sess.expires_at >= datetime('now')) as active_sessions
+     FROM customers cu
+     JOIN subscriptions s ON s.customer_id = cu.id
+     JOIN packages p ON p.id = s.package_id
+     WHERE p.number_mode = 'shared' AND s.status = 'active' AND s.end_date >= datetime('now')
+     ORDER BY cu.name COLLATE NOCASE`
+  ).all<{
+    id: number; name: string; activation_code: string | null; deactivation_code: string | null; active_sessions: number
+  }>()
+
+  const offices = (result.results || []).map((r) => ({
+    id: r.id,
+    name: r.name,
+    activation_command: r.activation_code || `${r.name} تفعيل`,
+    activation_is_custom: !!r.activation_code,
+    deactivation_command: r.deactivation_code || null,
+    active_sessions: r.active_sessions || 0
+  }))
+
+  return c.json({ offices })
+})
+
 // ---------------------- Feature 4: Umrah visa-check monitor ----------------------
 // Read-only visibility for the admin over the periodic checker's queue and
 // history (the VPS process itself polls/updates these rows via the

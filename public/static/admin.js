@@ -94,7 +94,7 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
 const titles = {
   overview: 'نظرة عامة', customers: 'العملاء', packages: 'الباقات',
   numbers: 'أرقام واتساب', groups: 'مجموعات واتساب', operations: 'سجل العمليات', test: 'اختبار الاستخراج',
-  welcome: 'رسالة الترحيب', suggestions: 'صندوق المقترحات', visachecks: 'فحوصات التأشيرات'
+  welcome: 'رسالة الترحيب', suggestions: 'صندوق المقترحات', visachecks: 'فحوصات التأشيرات', activation: 'أوامر التفعيل'
 };
 
 function switchTab(tab) {
@@ -120,6 +120,7 @@ async function render() {
     else if (currentTab === 'welcome') await renderWelcome(area);
     else if (currentTab === 'suggestions') await renderSuggestions(area);
     else if (currentTab === 'visachecks') await renderVisaChecks(area);
+    else if (currentTab === 'activation') await renderActivationCommands(area);
     else if (currentTab === 'test') await renderTest(area);
   } catch (err) {
     if (guardAuth(err)) return;
@@ -1088,6 +1089,94 @@ async function renderVisaChecks(area) {
 window.filterVisaChecks = function (status) {
   visaChecksFilter = status;
   render();
+};
+
+// ---------------------- Activation/deactivation commands overview ----------------------
+let activationSearch = '';
+let activationCommandsCache = [];
+
+async function renderActivationCommands(area) {
+  const { data } = await axios.get(`${API}/activation-commands`);
+  activationCommandsCache = data.offices;
+  area.innerHTML = `
+    <div class="bg-blue-50 border border-blue-100 rounded-2xl p-5 mb-6">
+      <button onclick="document.getElementById('gen-cmds-box').classList.toggle('hidden')" class="flex items-center justify-between w-full text-right">
+        <span class="font-bold text-blue-800"><i class="fa-solid fa-circle-info ml-1"></i> الأوامر العامة (تعمل لأي مكتب مُفعَّل بعد الربط) — اضغط للعرض/الإخفاء</span>
+        <i class="fa-solid fa-chevron-down text-blue-400"></i>
+      </button>
+      <div id="gen-cmds-box" class="hidden mt-4 grid md:grid-cols-2 gap-3 text-sm">
+        <div class="bg-white rounded-xl p-3 border border-blue-100">
+          <div class="font-bold text-gray-700 mb-1">فحص فوري لتأشيرة العمرة</div>
+          <div class="text-gray-500">فحص التاشيره / فحص التأشيرة / فحص الفيزا / تحقق من التاشيره / تحقق التاشيره</div>
+        </div>
+        <div class="bg-white rounded-xl p-3 border border-blue-100">
+          <div class="font-bold text-gray-700 mb-1">عرض القائمة التراكمية</div>
+          <div class="text-gray-500">القائمه / القائمة / قائمه الاسماء / قائمة الأسماء</div>
+        </div>
+        <div class="bg-white rounded-xl p-3 border border-blue-100">
+          <div class="font-bold text-gray-700 mb-1">تقرير دوري (نصي أو PDF)</div>
+          <div class="text-gray-500">تقرير يومي / تقرير شهري / تقرير سنوي (أضف "pdf" أو "مستند" للحصول على ملف PDF)</div>
+        </div>
+        <div class="bg-white rounded-xl p-3 border border-blue-100">
+          <div class="font-bold text-gray-700 mb-1">إرسال مقترح</div>
+          <div class="text-gray-500">اقتراح: ... (النص بعد الكلمة يُحفظ في صندوق المقترحات)</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flex items-center justify-between mb-4 gap-3">
+      <div class="relative flex-1 max-w-sm">
+        <i class="fa-solid fa-magnifying-glass absolute right-3 top-1/2 -translate-y-1/2 text-gray-300 text-sm"></i>
+        <input id="activation-search" value="${activationSearch}" oninput="filterActivationCommands(this.value)" placeholder="ابحث باسم المكتب..." class="w-full border border-gray-200 rounded-xl pr-9 pl-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
+      </div>
+      <span class="text-xs text-gray-400">${data.offices.length} مكتب على الرقم المشترك</span>
+    </div>
+
+    <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
+          <th class="p-4 font-medium">المكتب</th>
+          <th class="p-4 font-medium">أمر التفعيل</th>
+          <th class="p-4 font-medium">أمر الإلغاء</th>
+          <th class="p-4 font-medium">جلسات نشطة</th>
+          <th class="p-4 font-medium"></th>
+        </tr></thead>
+        <tbody id="activation-tbody"></tbody>
+      </table>
+    </div>
+  `;
+  renderActivationRows();
+}
+
+function renderActivationRows() {
+  const tbody = document.getElementById('activation-tbody');
+  const target = (activationSearch || '').trim();
+  const list = target ? activationCommandsCache.filter(o => o.name.includes(target)) : activationCommandsCache;
+  tbody.innerHTML = list.map(o => `
+    <tr class="border-b border-gray-50">
+      <td class="p-4 font-semibold">${o.name}</td>
+      <td class="p-4">
+        <span class="inline-flex items-center gap-2 text-xs font-bold px-2.5 py-1 rounded-full ${o.activation_is_custom ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-600'}">
+          <i class="fa-solid ${o.activation_is_custom ? 'fa-star' : 'fa-circle-dot'}"></i> ${o.activation_is_custom ? 'مخصص' : 'افتراضي'}
+        </span>
+        <span class="text-gray-700 mr-2">${o.activation_command}</span>
+        ${copyBtn(o.activation_command)}
+      </td>
+      <td class="p-4">
+        ${o.deactivation_command
+          ? `<span class="text-gray-700">${o.deactivation_command}</span> ${copyBtn(o.deactivation_command)}`
+          : '<span class="text-gray-400 text-xs">لا يوجد أمر إلغاء</span>'}
+      </td>
+      <td class="p-4 text-gray-500">${o.active_sessions}</td>
+      <td class="p-4">
+        <button onclick="openCustomerDetail(${o.id})" class="text-brand-600 hover:underline text-xs font-bold">تعديل</button>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="5" class="p-8 text-center text-gray-400">لا يوجد مكاتب على الرقم المشترك حالياً</td></tr>';
+}
+
+window.filterActivationCommands = function (value) {
+  activationSearch = value;
+  renderActivationRows();
 };
 
 // Init

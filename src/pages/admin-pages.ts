@@ -110,6 +110,7 @@ export function adminDashboardPage(): string {
         <button data-tab="welcome" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-comment-dots w-5"></i> رسالة الترحيب</button>
         <button data-tab="suggestions" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-lightbulb w-5"></i> صندوق المقترحات</button>
         <button data-tab="visachecks" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-passport w-5"></i> فحوصات التأشيرات</button>
+        <button data-tab="activation" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-key w-5"></i> أوامر التفعيل</button>
         <button data-tab="test" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-flask w-5"></i> اختبار الاستخراج</button>
       </nav>
       <div class="p-3 border-t border-gray-800">
