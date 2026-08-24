@@ -90,6 +90,36 @@ async function apiPost(path, body) {
 // submit, then detect success by URL (PrintedUmrahVisa / Print) and render
 // the result page to a landscape A4 PDF.
 // ---------------------------------------------------------------------
+// Scrapes the structured labeled fields from the MOFA result page (each
+// field is a `.col-3` block: Arabic label / value / English label — see
+// /home/user/visa_test/final_result.html for a captured sample). Used to
+// build the detailed visa-ready message ("نوع التأشيرة" / "صالحة اعتباراً
+// من") instead of the older blind full-page PDF-only delivery. Best-effort:
+// if the page layout ever changes and a field can't be found, the value is
+// simply omitted and the Worker falls back to the older simple caption
+// rather than failing the whole check.
+async function scrapeVisaFields(page) {
+  try {
+    const data = await page.evaluate(() => {
+      const result = {}
+      document.querySelectorAll('.col-3').forEach((block) => {
+        const labelEl = block.querySelector('.col-3-1')
+        const valueEl = block.querySelector('.col-3-2')
+        if (!labelEl || !valueEl) return
+        const label = labelEl.innerText.trim()
+        const value = valueEl.innerText.trim()
+        if (label.includes('نوع التأشيرة')) result.visa_type = value
+        if (label.includes('صالحة اعتبارا من')) result.valid_from = value
+      })
+      return result
+    })
+    return { visa_type: data.visa_type || null, valid_from: data.valid_from || null }
+  } catch (err) {
+    log('  ! scrapeVisaFields failed (non-fatal, falling back to simple caption):', err?.message || err)
+    return { visa_type: null, valid_from: null }
+  }
+}
+
 async function runMofaSearch(browser, { passport_number, first_name, nationality_code }) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
   try {
@@ -133,7 +163,8 @@ async function runMofaSearch(browser, { passport_number, first_name, nationality
       const success = url.includes('PrintedUmrahVisa') || url.includes('Print')
       if (success) {
         const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true, landscape: true })
-        return { outcome: 'found', pdfBuffer }
+        const fields = await scrapeVisaFields(page)
+        return { outcome: 'found', pdfBuffer, ...fields }
       }
 
       // Not a success URL yet. The same #dlgMessage modal is reused by MOFA
@@ -201,9 +232,11 @@ async function processVisaChecks(browser) {
         await apiPost(`/webhook/visa-checks/${check.id}/result`, {
           status: 'found',
           pdf_base64: result.pdfBuffer.toString('base64'),
-          pdf_mime_type: 'application/pdf'
+          pdf_mime_type: 'application/pdf',
+          visa_type: result.visa_type || undefined,
+          valid_from: result.valid_from || undefined
         })
-        log(`  #${check.id} -> FOUND, PDF delivered`)
+        log(`  #${check.id} -> FOUND, PDF delivered (visa_type=${result.visa_type || 'n/a'}, valid_from=${result.valid_from || 'n/a'})`)
       } else {
         await apiPost(`/webhook/visa-checks/${check.id}/result`, { status: 'not_ready', error: result.error })
         log(`  #${check.id} -> not_ready (${result.error})`)

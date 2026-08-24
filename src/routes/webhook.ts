@@ -498,12 +498,13 @@ async function handleIncomingMessage(params: {
     // office has enabled it via "تفعيل فحص التاشيره" (defaults to disabled).
     if (customer?.feature_visa_check_enabled && extraction.passport_number && extraction.full_name_ar) {
       try {
-        const firstName = extraction.full_name_ar.trim().split(/\s+/)[0]
+        const fullName = extraction.full_name_ar.trim()
+        const firstName = fullName.split(/\s+/)[0]
         const nextCheckAt = new Date(Date.now() + VISA_CHECK_INITIAL_DELAY_MIN * 60 * 1000).toISOString()
         await DB.prepare(
-          `INSERT INTO umrah_visa_checks (operation_id, customer_id, conversation_key, passport_number, first_name, nationality, next_check_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
-        ).bind(operationId, customerId, conversationKey, extraction.passport_number, firstName, extraction.nationality || null, nextCheckAt).run()
+          `INSERT INTO umrah_visa_checks (operation_id, customer_id, conversation_key, passport_number, first_name, full_name, nationality, next_check_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(operationId, customerId, conversationKey, extraction.passport_number, firstName, fullName, extraction.nationality || null, nextCheckAt).run()
       } catch (err) {
         console.error('Umrah visa check scheduling failed', err)
       }
@@ -835,12 +836,13 @@ webhook.post('/bridge/message', async (c) => {
 
     if (customer?.feature_visa_check_enabled && extraction.passport_number && extraction.full_name_ar) {
       try {
-        const firstName = extraction.full_name_ar.trim().split(/\s+/)[0]
+        const fullName = extraction.full_name_ar.trim()
+        const firstName = fullName.split(/\s+/)[0]
         const nextCheckAt = new Date(Date.now() + VISA_CHECK_INITIAL_DELAY_MIN * 60 * 1000).toISOString()
         await DB.prepare(
-          `INSERT INTO umrah_visa_checks (operation_id, customer_id, conversation_key, passport_number, first_name, nationality, next_check_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
-        ).bind(operationId, customerId, groupConversationKey, extraction.passport_number, firstName, extraction.nationality || null, nextCheckAt).run()
+          `INSERT INTO umrah_visa_checks (operation_id, customer_id, conversation_key, passport_number, first_name, full_name, nationality, next_check_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(operationId, customerId, groupConversationKey, extraction.passport_number, firstName, fullName, extraction.nationality || null, nextCheckAt).run()
       } catch (err) {
         console.error('Umrah visa check scheduling failed (group)', err)
       }
@@ -925,14 +927,37 @@ webhook.get('/visa-checks/pending', async (c) => {
   })
 })
 
+// Builds the visa-ready delivery caption. Uses the richer template (name /
+// passport / visa type / valid-from date) whenever the VPS checker managed
+// to scrape those structured fields from the MOFA result page; falls back
+// to the older simple caption if visa_type/valid_from weren't provided
+// (e.g. MOFA page layout changed and the scrape came up empty) so delivery
+// never silently fails just because the extra detail is missing.
+function buildVisaReadyCaption(check: any, visaType?: string | null, validFrom?: string | null): string {
+  const name = check.full_name || check.first_name
+  if (visaType || validFrom) {
+    const lines = [
+      '✨ تأشيرتك جاهزة ! ✅',
+      `👤 الاسم: ${name}`,
+      `🎫 الجواز: ${check.passport_number}`
+    ]
+    if (visaType) lines.push(`نوع التأشيرة: ${visaType}`)
+    if (validFrom) lines.push(`صالحة اعتباراً من : ${validFrom}`)
+    return lines.join('\n')
+  }
+  return `✅ تأشيرة العمرة الخاصة بـ ${check.first_name} (${check.passport_number}) جاهزة.`
+}
+
 // POST /webhook/visa-checks/:id/result
-// Body: { status: 'found', pdf_base64, pdf_mime_type? } to deliver the PDF
-// and mark done, OR { status: 'not_ready' } to reschedule +20 minutes, OR
-// { status: 'failed', error } to record an error and reschedule +20 minutes
-// (the checker keeps retrying automatically; there is no terminal failure
-// state here by design — MOFA/network hiccups should not silently stop
-// retries. An admin/customer can still be added later if a hard stop is
-// ever needed).
+// Body: { status: 'found', pdf_base64, pdf_mime_type?, visa_type?, valid_from? }
+// to deliver the PDF and mark done (visa_type/valid_from are the structured
+// fields scraped from the MOFA result page, used to build the detailed
+// caption — see buildVisaReadyCaption above), OR { status: 'not_ready' } to
+// reschedule +VISA_CHECK_RETRY_INTERVAL_MIN minutes, OR { status: 'failed',
+// error } to record an error and reschedule the same way (the checker keeps
+// retrying automatically; there is no terminal failure state here by design
+// — MOFA/network hiccups should not silently stop retries. An admin/customer
+// can still be added later if a hard stop is ever needed).
 webhook.post('/visa-checks/:id/result', async (c) => {
   const authErr = requireVisaCheckerAuth(c)
   if (authErr) return authErr
@@ -943,7 +968,7 @@ webhook.post('/visa-checks/:id/result', async (c) => {
   const check = await DB.prepare('SELECT * FROM umrah_visa_checks WHERE id = ?').bind(id).first<any>()
   if (!check) return c.json({ error: 'not found' }, 404)
 
-  let body: { status?: string; pdf_base64?: string; pdf_mime_type?: string; error?: string }
+  let body: { status?: string; pdf_base64?: string; pdf_mime_type?: string; error?: string; visa_type?: string; valid_from?: string }
   try {
     body = await c.req.json()
   } catch {
@@ -961,14 +986,14 @@ webhook.post('/visa-checks/:id/result', async (c) => {
         base64: body.pdf_base64,
         mimeType: body.pdf_mime_type || 'application/pdf',
         filename: `تأشيرة-عمرة-${check.passport_number}.pdf`,
-        caption: `✅ تأشيرة العمرة الخاصة بـ ${check.first_name} (${check.passport_number}) جاهزة.`
+        caption: buildVisaReadyCaption(check, body.visa_type, body.valid_from)
       },
       WHATSAPP_API_VERSION
     )
 
     await DB.prepare(
-      `UPDATE umrah_visa_checks SET status='found', found_at=datetime('now'), last_error=?, updated_at=datetime('now') WHERE id=?`
-    ).bind(deliverResult.ok ? null : `delivery failed: ${deliverResult.error}`, id).run()
+      `UPDATE umrah_visa_checks SET status='found', found_at=datetime('now'), visa_type=?, valid_from=?, last_error=?, updated_at=datetime('now') WHERE id=?`
+    ).bind(body.visa_type || null, body.valid_from || null, deliverResult.ok ? null : `delivery failed: ${deliverResult.error}`, id).run()
 
     return c.json({ ok: true, delivered: deliverResult.ok })
   }
