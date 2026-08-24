@@ -21,12 +21,16 @@ const SHARED_SESSION_DAYS = 30
 // this be fully customized (e.g. "for activation contact ...").
 const DEFAULT_WELCOME_MESSAGE = '👋 أهلاً وسهلاً! لتفعيل الخدمة يرجى التواصل مع إدارة المنصة.'
 
-// Umrah visa auto-check timing (feature 4): first check 30 minutes after the
-// passport photo is received, then retry every 30 minutes until found
-// (unified to a single interval by explicit user decision on 2026-08-23 —
-// was previously 180min initial delay / 20min retry interval).
-const VISA_CHECK_INITIAL_DELAY_MIN = 30
-const VISA_CHECK_RETRY_INTERVAL_MIN = 30
+// Umrah visa auto-check timing (feature 4): first check 5 minutes after the
+// passport photo is received, then retry every 5 minutes until found.
+// History:
+//  - 2026-08-23: unified to 30min/30min (was 180min initial / 20min retry)
+//    specifically to reduce load on the official MOFA government website.
+//  - 2026-08-24: lowered to 5min/5min by explicit user decision, prioritizing
+//    near-instant visa delivery over further reducing MOFA request frequency
+//    (accepted tradeoff: ~12 checks/hour per pending passport instead of ~2).
+const VISA_CHECK_INITIAL_DELAY_MIN = 5
+const VISA_CHECK_RETRY_INTERVAL_MIN = 5
 
 // Feature 6 (Auto-Extract toggle, migration 0009): safety cap on how many
 // queued images a single "استخراج" command processes in one call, to keep
