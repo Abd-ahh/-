@@ -1,0 +1,14 @@
+{
+  "name": "visa-checker",
+  "version": "1.0.0",
+  "description": "Periodic Umrah visa auto-check (Playwright + Gemini Vision) + generic HTML->PDF render worker for Passport AI WhatsApp",
+  "main": "checker.js",
+  "scripts": {
+    "start": "node checker.js"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "playwright": "^1.62.1",
+    "dotenv": "^16.4.5"
+  }
+}

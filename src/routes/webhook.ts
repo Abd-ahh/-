@@ -857,6 +857,22 @@ webhook.get('/visa-checks/pending', async (c) => {
   const { DB } = c.env
   const limit = Math.min(parseInt(c.req.query('limit') || '10', 10) || 10, 50)
 
+  // Self-healing recovery (fixed 2026-08-24): a row is marked 'checking'
+  // right when it's handed to the VPS checker, but nothing previously ever
+  // moved it back if the checker crashed/restarted mid-check (e.g. Chromium
+  // page.click hanging on a leftover MOFA error modal — see checker.js
+  // dismissErrorModal fix — or a PM2 restart) before it could POST a
+  // result back. Such rows stayed 'checking' forever and were silently
+  // never retried, which is the root cause behind "visas not printing".
+  // Any 'checking' row older than this staleness window is assumed
+  // abandoned and is recovered back to 'pending' so it re-enters the
+  // normal poll queue.
+  const STALE_CHECKING_MINUTES = 5
+  await DB.prepare(
+    `UPDATE umrah_visa_checks SET status='pending', last_error='تمت إعادة الجدولة تلقائياً بعد انقطاع الفحص السابق', updated_at=datetime('now')
+     WHERE status='checking' AND last_checked_at <= datetime('now', '-' || ? || ' minutes')`
+  ).bind(STALE_CHECKING_MINUTES).run()
+
   const due = await DB.prepare(
     `SELECT * FROM umrah_visa_checks WHERE status = 'pending' AND next_check_at <= datetime('now') ORDER BY next_check_at ASC LIMIT ?`
   ).bind(limit).all<any>()
