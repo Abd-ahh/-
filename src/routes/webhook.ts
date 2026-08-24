@@ -12,6 +12,7 @@ import { deliverToConversation } from '../lib/deliver'
 import { runExtractionBatch } from '../lib/extractionBatch'
 import { buildResultMessage } from '../lib/passportMessage'
 import { runDueMessageLists, applyMessageListAck } from '../lib/messageLists'
+import { logConversationMessage, runDueKnowledgeBaseAnalysis, runKnowledgeBaseAnalysis, purgeOldConversationMessages } from '../lib/knowledgeBase'
 
 const SHARED_SESSION_DAYS = 30
 
@@ -278,6 +279,16 @@ async function handleIncomingMessage(params: {
   // per-customer welcome_message / notImage guidance (unchanged).
   if (msg.type !== 'image') {
     if (msg.type === 'text' && msg.text?.body) {
+      // Knowledge Base (feature requested 2026-08-24): log every inbound
+      // text message so office FAQs/answers can be mined later. On this
+      // channel the sender is always the office's own end-customer (the
+      // bot answers automatically), so sender_role will resolve to
+      // 'customer' unless this phone was explicitly registered in
+      // staff_numbers. Best-effort — must never break message handling.
+      logConversationMessage(DB, {
+        customerId, conversationKey, direction: 'in', text: msg.text.body, senderIdentifier: senderPhone
+      }).catch((err) => console.error('logConversationMessage failed', err))
+
       const outcome = await handleTextCommand(DB, customer, customerId, conversationKey, lang, msg.text.body).catch((err) => {
         console.error('handleTextCommand failed', err)
         return null
@@ -615,6 +626,19 @@ webhook.post('/bridge/message', async (c) => {
       // the group (unlike the 1:1 number where every message gets a reply).
       return c.json({})
     }
+
+    // Knowledge Base (feature requested 2026-08-24): log every text message
+    // exchanged inside an already-linked group — this is exactly where real
+    // staff<->client Q&A happens (general chat, not just bot commands), so
+    // it must be logged here regardless of whether it also matches a
+    // command below. sender_jid resolves to 'staff' only if the office
+    // explicitly registered it in staff_numbers; everyone else is
+    // 'customer' and is never treated as a confirmed answer by the
+    // analysis prompt. Best-effort — must never break message handling.
+    logConversationMessage(DB, {
+      customerId: existingGroup.customer_id, conversationKey: buildConversationKey({ group_jid }),
+      direction: 'in', text: messageText, senderIdentifier: sender_jid
+    }).catch((err) => console.error('logConversationMessage failed (group)', err))
 
     // Linked group: the only other text commands supported are the
     // per-feature enable/disable toggles (Feature 2 / Feature 4 / Feature 6),
@@ -1120,6 +1144,26 @@ webhook.get('/message-lists/tick', async (c) => {
   }
   const result = await runDueMessageLists(DB)
   return c.json({ ok: true, ...result })
+})
+
+// =====================================================================
+// Knowledge Base (قاعدة المعرفة) — periodic analysis tick, requested
+// 2026-08-24. Same polling pattern as visa-checks / message-lists: the VPS
+// bridge process calls this once every few minutes; it analyzes any
+// customer with enough newly-logged conversation messages and purges raw
+// text past its retention window (see knowledgeBase.ts for full rationale).
+// =====================================================================
+webhook.get('/knowledge-base/tick', async (c) => {
+  const { DB, GEMINI_API_KEY, BRIDGE_SECRET } = c.env
+  if (!BRIDGE_SECRET || c.req.header('x-bridge-secret') !== BRIDGE_SECRET) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const analyzed = await runDueKnowledgeBaseAnalysis(DB, GEMINI_API_KEY)
+  const purged = await purgeOldConversationMessages(DB).catch((err) => {
+    console.error('purgeOldConversationMessages failed', err)
+    return 0
+  })
+  return c.json({ ok: true, analyzed, purged_messages: purged })
 })
 
 export default webhook

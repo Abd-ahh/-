@@ -201,6 +201,63 @@ export interface PassportExtractionResult {
   confidence?: number
 }
 
+// ---------------------- Knowledge Base (قاعدة المعرفة, migration 0011) ----------------------
+export interface StaffNumberRow {
+  id: number
+  customer_id: number
+  identifier: string // phone digits or WhatsApp JID
+  label: string | null
+  created_at: string
+}
+
+export type SenderRole = 'staff' | 'customer' | 'bot' | 'unknown'
+
+export interface ConversationMessageRow {
+  id: number
+  customer_id: number
+  conversation_key: string
+  direction: 'in' | 'out'
+  sender_role: SenderRole
+  sender_identifier: string | null
+  text: string
+  analyzed_at: string | null
+  created_at: string
+}
+
+export type KnowledgeConfidence = 'high' | 'medium' | 'low' | 'unknown'
+export type KnowledgeStatus = 'pending_review' | 'approved' | 'rejected'
+
+export interface KnowledgeBaseRow {
+  id: number
+  customer_id: number
+  category: string
+  question_intent: string | null
+  knowledge: string
+  suggested_answer: string | null
+  source: string | null
+  confidence: KnowledgeConfidence
+  is_conflicting: number
+  needs_review: number
+  status: KnowledgeStatus
+  extracted_at: string
+  reviewed_at: string | null
+  reviewed_by: string | null
+  created_at: string
+}
+
+// Shape returned by Gemini for each extracted knowledge item (see
+// knowledgeBase.ts buildAnalysisPrompt / parseAnalysisResponse).
+export interface KnowledgeExtractionItem {
+  category: string
+  question_intent: string
+  knowledge: string
+  suggested_answer: string | null
+  source: string
+  confidence: KnowledgeConfidence
+  is_conflicting: boolean
+  needs_review: boolean
+}
+
 // ---------------------- Message Lists (قوائم رسائل, migration 0010) ----------------------
 // Scheduled WhatsApp marketing/broadcast lists. Delivery goes exclusively
 // through the unofficial Baileys bridge's group_outbox queue (see

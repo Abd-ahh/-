@@ -94,7 +94,8 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
 const titles = {
   overview: 'نظرة عامة', customers: 'العملاء', packages: 'الباقات',
   numbers: 'أرقام واتساب', groups: 'مجموعات واتساب', messagelists: 'قوائم الرسائل', operations: 'سجل العمليات', test: 'اختبار الاستخراج',
-  welcome: 'رسالة الترحيب', suggestions: 'صندوق المقترحات', visachecks: 'فحوصات التأشيرات', activation: 'أوامر التفعيل'
+  welcome: 'رسالة الترحيب', suggestions: 'صندوق المقترحات', visachecks: 'فحوصات التأشيرات', activation: 'أوامر التفعيل',
+  knowledgebase: 'قاعدة المعرفة'
 };
 
 function switchTab(tab) {
@@ -122,6 +123,7 @@ async function render() {
     else if (currentTab === 'suggestions') await renderSuggestions(area);
     else if (currentTab === 'visachecks') await renderVisaChecks(area);
     else if (currentTab === 'activation') await renderActivationCommands(area);
+    else if (currentTab === 'knowledgebase') await renderKnowledgeBase(area);
     else if (currentTab === 'test') await renderTest(area);
   } catch (err) {
     if (guardAuth(err)) return;
@@ -1479,6 +1481,207 @@ function featureBadges(features) {
 window.filterActivationCommands = function (value) {
   activationSearch = value;
   renderActivationRows();
+};
+
+// ---------------- Feature 5: Knowledge Base (قاعدة المعرفة) ----------------
+// Admin view: pick any office, manage its confirmed staff numbers (used to
+// tell staff answers apart from customer messages), and review/approve the
+// knowledge items extracted by Gemini from the office's WhatsApp conversations.
+// Nothing here is used live by the bot yet — everything starts as
+// "pending_review" and must be approved manually (a later phase).
+let kbCustomerId = null;
+let kbStaffCache = [];
+let kbItemsCache = [];
+let kbStatusFilter = 'pending_review';
+
+async function renderKnowledgeBase(area) {
+  if (!customersCache.length) {
+    const { data } = await axios.get(`${API}/customers`);
+    customersCache = data.customers;
+  }
+  if (!kbCustomerId && customersCache.length) kbCustomerId = customersCache[0].id;
+
+  area.innerHTML = `
+    <div class="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-xl p-4 mb-5">
+      <i class="fa-solid fa-circle-info ml-1"></i>
+      قاعدة المعرفة تُستخرج تلقائياً من محادثات المكتب على واتساب (لا تُخترع معلومات ولا تُعتبر كلام العميل حقيقة إلا إذا أكّده موظف مسجَّل). كل عنصر يبقى "قيد المراجعة" حتى تعتمده يدوياً.
+    </div>
+    <div class="flex items-center gap-3 mb-5">
+      <label class="text-sm font-bold text-gray-600">المكتب:</label>
+      <select id="kb-customer-select" class="border border-gray-200 rounded-xl px-4 py-2.5 text-sm min-w-[220px]">
+        ${customersCache.map(c => `<option value="${c.id}" ${c.id === kbCustomerId ? 'selected' : ''}>${c.name}</option>`).join('')}
+      </select>
+      <button onclick="analyzeKbNow()" class="bg-brand-600 hover:bg-brand-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl">
+        <i class="fa-solid fa-wand-magic-sparkles ml-1"></i> تحليل الآن
+      </button>
+    </div>
+    <div id="kb-body"></div>
+  `;
+  document.getElementById('kb-customer-select').addEventListener('change', (e) => {
+    kbCustomerId = Number(e.target.value);
+    renderKnowledgeBaseBody();
+  });
+  await renderKnowledgeBaseBody();
+}
+
+async function renderKnowledgeBaseBody() {
+  const body = document.getElementById('kb-body');
+  body.innerHTML = '<div class="text-center text-gray-400 py-10"><i class="fa-solid fa-spinner fa-spin"></i></div>';
+  if (!kbCustomerId) { body.innerHTML = '<p class="text-gray-400 text-center py-10">أضف عميلاً أولاً</p>'; return; }
+
+  const [{ data: staffData }, { data: itemsData }] = await Promise.all([
+    axios.get(`${API}/staff-numbers`, { params: { customer_id: kbCustomerId } }),
+    axios.get(`${API}/knowledge-base`, { params: { customer_id: kbCustomerId, ...(kbStatusFilter ? { status: kbStatusFilter } : {}) } })
+  ]);
+  kbStaffCache = staffData.staff_numbers;
+  kbItemsCache = itemsData.items;
+
+  body.innerHTML = `
+    <div class="grid lg:grid-cols-3 gap-6">
+      <div class="bg-white rounded-2xl border border-gray-100 p-5 lg:col-span-1">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-bold text-gray-900">أرقام الموظفين (${kbStaffCache.length})</h3>
+          <button onclick="openKbStaffModal()" class="bg-brand-600 hover:bg-brand-700 text-white text-xs font-bold px-3 py-2 rounded-lg"><i class="fa-solid fa-plus ml-1"></i> رقم</button>
+        </div>
+        <p class="text-xs text-gray-400 mb-3">فقط الرسائل الواردة من هذه الأرقام تُعتبر "إجابة موظف مؤكدة" عند استخراج المعرفة.</p>
+        <div class="space-y-2 max-h-96 overflow-y-auto">
+          ${kbStaffCache.map(s => `
+            <div class="flex items-center justify-between bg-gray-50 rounded-lg p-3 text-sm">
+              <div>
+                <p class="font-semibold">${s.label || 'بدون اسم'}</p>
+                <p class="text-xs text-gray-400" dir="ltr">${s.identifier}</p>
+              </div>
+              <button onclick="deleteKbStaff(${s.id})" class="text-gray-400 hover:text-red-500 text-xs"><i class="fa-solid fa-trash"></i></button>
+            </div>`).join('') || '<p class="text-gray-400 text-center py-6 text-sm">لا توجد أرقام موظفين مسجّلة بعد</p>'}
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-gray-100 p-5 lg:col-span-2">
+        <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <h3 class="font-bold text-gray-900">عناصر المعرفة (${kbItemsCache.length})</h3>
+          <div class="flex items-center gap-2">
+            ${['pending_review', 'approved', 'rejected', ''].map(s => `
+              <button onclick="filterKbStatus('${s}')" class="px-3 py-1.5 rounded-lg text-xs font-bold ${kbStatusFilter === s ? 'bg-brand-600 text-white' : 'bg-gray-100 text-gray-600'}">
+                ${s === '' ? 'الكل' : s === 'pending_review' ? 'قيد المراجعة' : s === 'approved' ? 'معتمدة' : 'مرفوضة'}
+              </button>`).join('')}
+          </div>
+        </div>
+        <div class="space-y-3 max-h-[32rem] overflow-y-auto">
+          ${kbItemsCache.map(it => `
+            <div class="bg-gray-50 rounded-xl p-4 text-sm border border-gray-100">
+              <div class="flex items-center justify-between mb-2 flex-wrap gap-1">
+                <span class="text-[11px] font-bold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700">${it.category}</span>
+                <div class="flex items-center gap-1">
+                  ${it.is_conflicting ? '<span class="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-700">متعارضة</span>' : ''}
+                  ${it.needs_review ? '<span class="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700">تحتاج مراجعة</span>' : ''}
+                  <span class="text-[11px] font-bold px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">ثقة: ${confidenceLabel(it.confidence)}</span>
+                </div>
+              </div>
+              ${it.question_intent ? `<p class="text-gray-500 text-xs mb-1"><i class="fa-solid fa-circle-question ml-1"></i>${it.question_intent}</p>` : ''}
+              <p class="font-semibold text-gray-800 mb-1">${it.knowledge}</p>
+              ${it.suggested_answer ? `<p class="text-gray-600 text-xs mb-1"><i class="fa-solid fa-reply ml-1"></i>${it.suggested_answer}</p>` : ''}
+              <p class="text-[11px] text-gray-400">المصدر: ${it.source || '-'} — ${fmtDate(it.extracted_at)}</p>
+              <div class="flex items-center justify-between mt-3">
+                <span>${statusBadge(it.status === 'pending_review' ? 'new' : it.status === 'approved' ? 'done' : 'cancelled')}</span>
+                <div class="flex gap-2">
+                  ${it.status !== 'approved' ? `<button onclick="updateKbStatus(${it.id}, 'approved')" class="text-emerald-600 hover:underline text-xs font-bold">اعتماد</button>` : ''}
+                  ${it.status !== 'rejected' ? `<button onclick="updateKbStatus(${it.id}, 'rejected')" class="text-amber-600 hover:underline text-xs font-bold">رفض</button>` : ''}
+                  <button onclick="deleteKbItem(${it.id})" class="text-red-500 hover:underline text-xs font-bold">حذف</button>
+                </div>
+              </div>
+            </div>`).join('') || '<p class="text-gray-400 text-center py-10 text-sm">لا توجد عناصر معرفة بهذا الفلتر بعد</p>'}
+        </div>
+      </div>
+    </div>
+    <div id="modal-root"></div>
+  `;
+}
+
+function confidenceLabel(c) {
+  return c === 'high' ? 'عالية' : c === 'medium' ? 'متوسطة' : c === 'low' ? 'منخفضة' : 'غير معروفة';
+}
+
+window.filterKbStatus = function (status) {
+  kbStatusFilter = status;
+  renderKnowledgeBaseBody();
+};
+
+window.openKbStaffModal = function () {
+  const modal = document.getElementById('modal-root');
+  modal.innerHTML = `
+    <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-2xl p-6 w-full max-w-md">
+        <h3 class="font-bold text-lg mb-4">إضافة رقم موظف</h3>
+        <div class="space-y-3">
+          <input id="kb-staff-label" placeholder="اسم الموظف (اختياري)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="kb-staff-identifier" placeholder="رقم الواتساب أو JID، مثال: 9665xxxxxxxx" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" dir="ltr" />
+        </div>
+        <div class="flex gap-2 mt-5">
+          <button onclick="closeModal()" class="flex-1 border border-gray-200 rounded-xl py-2.5 font-bold text-gray-600">إلغاء</button>
+          <button onclick="saveKbStaff()" class="flex-1 bg-brand-600 hover:bg-brand-700 text-white rounded-xl py-2.5 font-bold">حفظ</button>
+        </div>
+      </div>
+    </div>
+  `;
+};
+
+window.saveKbStaff = async function () {
+  const identifier = document.getElementById('kb-staff-identifier').value.trim();
+  const label = document.getElementById('kb-staff-label').value.trim();
+  if (!identifier) { alert('الرجاء إدخال رقم أو JID'); return; }
+  try {
+    await axios.post(`${API}/staff-numbers`, { customer_id: kbCustomerId, identifier, label: label || null });
+    closeModal();
+    await renderKnowledgeBaseBody();
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+window.deleteKbStaff = async function (id) {
+  if (!confirm('حذف هذا الرقم من قائمة الموظفين؟')) return;
+  try {
+    await axios.delete(`${API}/staff-numbers/${id}`, { params: { customer_id: kbCustomerId } });
+    await renderKnowledgeBaseBody();
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+window.updateKbStatus = async function (id, status) {
+  try {
+    await axios.put(`${API}/knowledge-base/${id}`, { status });
+    await renderKnowledgeBaseBody();
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+window.deleteKbItem = async function (id) {
+  if (!confirm('حذف عنصر المعرفة هذا نهائياً؟')) return;
+  try {
+    await axios.delete(`${API}/knowledge-base/${id}`);
+    await renderKnowledgeBaseBody();
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+window.analyzeKbNow = async function () {
+  if (!kbCustomerId) return;
+  try {
+    const { data } = await axios.post(`${API}/knowledge-base/analyze-now`, { customer_id: kbCustomerId });
+    if (data.error) { alert(data.error); return; }
+    alert(`تم التحليل — رسائل مُحلَّلة: ${data.analyzed ?? 0}، عناصر مستخرجة: ${data.extracted ?? 0}`);
+    await renderKnowledgeBaseBody();
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ أثناء التحليل');
+  }
 };
 
 // Init

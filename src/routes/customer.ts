@@ -8,6 +8,7 @@ import {
   listMessageLists, getMessageListDetail, validateMessageListInput, createMessageList,
   updateMessageList, deleteMessageList
 } from '../lib/messageLists'
+import { listStaffNumbers, addStaffNumber, removeStaffNumber, runKnowledgeBaseAnalysis } from '../lib/knowledgeBase'
 import type { AppEnv } from '../lib/types'
 
 const customer = new Hono<AppEnv>()
@@ -330,6 +331,75 @@ customer.post('/message-lists/:listId/send-now', async (c) => {
   const list = await DB.prepare('SELECT * FROM message_lists WHERE id = ? AND customer_id = ?').bind(listId, id).first<any>()
   if (!list) return c.json({ error: 'القائمة غير موجودة أو لا تخص مكتبك' }, 404)
   const result = await fireMessageList(DB, list)
+  return c.json({ success: true, ...result })
+})
+
+// =====================================================================
+// Knowledge Base (قاعدة المعرفة) — requested 2026-08-24, always scoped to
+// the logged-in office's own customer_id via the JWT (never accepted from
+// the request body/query, same pattern as every other customer.ts route).
+// =====================================================================
+
+customer.get('/staff-numbers', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const list = await listStaffNumbers(DB, id)
+  return c.json({ staff_numbers: list })
+})
+
+customer.post('/staff-numbers', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const { identifier, label } = await c.req.json()
+  if (!identifier) return c.json({ error: 'identifier مطلوب' }, 400)
+  await addStaffNumber(DB, id, identifier, label || null)
+  return c.json({ success: true })
+})
+
+customer.delete('/staff-numbers/:staffId', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const staffId = parseInt(c.req.param('staffId'), 10)
+  await removeStaffNumber(DB, id, staffId)
+  return c.json({ success: true })
+})
+
+customer.get('/knowledge-base', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const status = c.req.query('status')
+  let query = 'SELECT * FROM knowledge_base WHERE customer_id = ?'
+  const binds: any[] = [id]
+  if (status) { query += ' AND status = ?'; binds.push(status) }
+  query += ' ORDER BY created_at DESC LIMIT 200'
+  const res = await DB.prepare(query).bind(...binds).all()
+  return c.json({ items: res.results || [] })
+})
+
+// The office can only mark items reviewed/approved for its own knowledge
+// base — it cannot see or touch other offices' data (customer_id always
+// forced from the JWT, never trusted from the request).
+customer.put('/knowledge-base/:itemId', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const itemId = parseInt(c.req.param('itemId'), 10)
+  const { status } = await c.req.json()
+  if (!['approved', 'rejected', 'pending_review'].includes(status)) {
+    return c.json({ error: 'status غير صالحة' }, 400)
+  }
+  const custRow = c.get('customer')!
+  const result = await DB.prepare(
+    `UPDATE knowledge_base SET status = ?, reviewed_at = datetime('now'), reviewed_by = ? WHERE id = ? AND customer_id = ?`
+  ).bind(status, custRow.email, itemId, id).run()
+  if (!result.meta?.changes) return c.json({ error: 'العنصر غير موجود أو لا يخص مكتبك' }, 404)
+  return c.json({ success: true })
+})
+
+customer.post('/knowledge-base/analyze-now', async (c) => {
+  const { DB, GEMINI_API_KEY } = c.env
+  const id = c.get('customer')!.id
+  const result = await runKnowledgeBaseAnalysis(DB, GEMINI_API_KEY, id)
+  if ('error' in result) return c.json(result, 400)
   return c.json({ success: true, ...result })
 })
 

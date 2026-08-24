@@ -10,6 +10,7 @@ import {
   listMessageLists, getMessageListDetail, validateMessageListInput, createMessageList,
   updateMessageList, deleteMessageList
 } from '../lib/messageLists'
+import { listStaffNumbers, addStaffNumber, removeStaffNumber, runKnowledgeBaseAnalysis } from '../lib/knowledgeBase'
 import type { AppEnv } from '../lib/types'
 
 const admin = new Hono<AppEnv>()
@@ -808,6 +809,88 @@ admin.post('/message-lists/:id/send-now', async (c) => {
   const list = await DB.prepare('SELECT * FROM message_lists WHERE id = ?').bind(id).first<any>()
   if (!list) return c.json({ error: 'القائمة غير موجودة' }, 404)
   const result = await fireMessageList(DB, list)
+  return c.json({ success: true, ...result })
+})
+
+// =====================================================================
+// Knowledge Base (قاعدة المعرفة) — requested 2026-08-24. Admin can see and
+// manage EVERY office's staff-number registry and extracted knowledge (a
+// customer_id query param scopes to one office; without it these list
+// endpoints show a platform-wide view). See knowledgeBase.ts /
+// migrations/0011 for the full privacy-design rationale.
+// =====================================================================
+
+// ---- Staff numbers (who counts as a confirmed office employee) ----
+admin.get('/staff-numbers', async (c) => {
+  const { DB } = c.env
+  const customerId = c.req.query('customer_id')
+  if (!customerId) return c.json({ error: 'customer_id مطلوب' }, 400)
+  const list = await listStaffNumbers(DB, parseInt(customerId, 10))
+  return c.json({ staff_numbers: list })
+})
+
+admin.post('/staff-numbers', async (c) => {
+  const { DB } = c.env
+  const { customer_id, identifier, label } = await c.req.json()
+  if (!customer_id || !identifier) return c.json({ error: 'customer_id و identifier مطلوبان' }, 400)
+  await addStaffNumber(DB, customer_id, identifier, label || null)
+  return c.json({ success: true })
+})
+
+admin.delete('/staff-numbers/:id', async (c) => {
+  const { DB } = c.env
+  const id = parseInt(c.req.param('id'), 10)
+  const customerId = c.req.query('customer_id')
+  if (!customerId) return c.json({ error: 'customer_id مطلوب' }, 400)
+  await removeStaffNumber(DB, parseInt(customerId, 10), id)
+  return c.json({ success: true })
+})
+
+// ---- Extracted knowledge items (review queue) ----
+admin.get('/knowledge-base', async (c) => {
+  const { DB } = c.env
+  const customerId = c.req.query('customer_id')
+  const status = c.req.query('status') // pending_review | approved | rejected
+  let query = `SELECT kb.*, cu.name as customer_name FROM knowledge_base kb
+               JOIN customers cu ON cu.id = kb.customer_id WHERE 1=1`
+  const binds: any[] = []
+  if (customerId) { query += ' AND kb.customer_id = ?'; binds.push(parseInt(customerId, 10)) }
+  if (status) { query += ' AND kb.status = ?'; binds.push(status) }
+  query += ' ORDER BY kb.created_at DESC LIMIT 200'
+  const res = await DB.prepare(query).bind(...binds).all()
+  return c.json({ items: res.results || [] })
+})
+
+admin.put('/knowledge-base/:id', async (c) => {
+  const { DB } = c.env
+  const id = parseInt(c.req.param('id'), 10)
+  const { status } = await c.req.json() // approved | rejected | pending_review
+  if (!['approved', 'rejected', 'pending_review'].includes(status)) {
+    return c.json({ error: 'status غير صالحة' }, 400)
+  }
+  const adminUser = c.get('admin')
+  await DB.prepare(
+    `UPDATE knowledge_base SET status = ?, reviewed_at = datetime('now'), reviewed_by = ? WHERE id = ?`
+  ).bind(status, adminUser?.email || null, id).run()
+  return c.json({ success: true })
+})
+
+admin.delete('/knowledge-base/:id', async (c) => {
+  const { DB } = c.env
+  const id = parseInt(c.req.param('id'), 10)
+  await DB.prepare('DELETE FROM knowledge_base WHERE id = ?').bind(id).run()
+  return c.json({ success: true })
+})
+
+// Manual on-demand trigger (in addition to the periodic VPS-polled tick) —
+// useful right after registering staff numbers to see results immediately
+// instead of waiting for the next tick.
+admin.post('/knowledge-base/analyze-now', async (c) => {
+  const { DB, GEMINI_API_KEY } = c.env
+  const { customer_id } = await c.req.json()
+  if (!customer_id) return c.json({ error: 'customer_id مطلوب' }, 400)
+  const result = await runKnowledgeBaseAnalysis(DB, GEMINI_API_KEY, customer_id)
+  if ('error' in result) return c.json(result, 400)
   return c.json({ success: true, ...result })
 })
 

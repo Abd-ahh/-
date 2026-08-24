@@ -79,6 +79,7 @@ export function customerDashboardPage(): string {
       <button data-tab="operations" class="tab-btn whitespace-nowrap px-5 py-2.5 rounded-xl font-bold text-sm bg-white text-gray-600 border border-gray-200">سجل العمليات</button>
       <button data-tab="cumulative" class="tab-btn whitespace-nowrap px-5 py-2.5 rounded-xl font-bold text-sm bg-white text-gray-600 border border-gray-200">القائمة التراكمية</button>
       <button data-tab="messagelists" class="tab-btn whitespace-nowrap px-5 py-2.5 rounded-xl font-bold text-sm bg-white text-gray-600 border border-gray-200">قوائم الرسائل</button>
+      <button data-tab="knowledgebase" class="tab-btn whitespace-nowrap px-5 py-2.5 rounded-xl font-bold text-sm bg-white text-gray-600 border border-gray-200">قاعدة المعرفة</button>
       <button data-tab="settings" class="tab-btn whitespace-nowrap px-5 py-2.5 rounded-xl font-bold text-sm bg-white text-gray-600 border border-gray-200">الإعدادات</button>
     </nav>
 

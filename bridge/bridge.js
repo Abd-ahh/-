@@ -140,6 +140,29 @@ async function tickMessageLists() {
   }
 }
 
+// Knowledge Base periodic analysis (requested 2026-08-24) — same
+// once-every-few-minutes polling pattern as the ticks above. Deliberately
+// less frequent (default 10 min) since this only decides whether enough new
+// messages piled up to justify a Gemini analysis call, unlike the
+// time-sensitive message-lists/visa-check ticks.
+const KNOWLEDGE_BASE_TICK_INTERVAL_MS = parseInt(process.env.KNOWLEDGE_BASE_TICK_INTERVAL_MS || '600000', 10)
+
+async function tickKnowledgeBase() {
+  try {
+    const resp = await fetch(`${WORKER_URL}/webhook/knowledge-base/tick`, {
+      headers: { 'X-Bridge-Secret': BRIDGE_SECRET }
+    })
+    if (!resp.ok) {
+      logger.error({ status: resp.status }, 'knowledge-base tick failed')
+      return
+    }
+    const data = await resp.json()
+    logger.info(data, 'knowledge-base tick done')
+  } catch (err) {
+    logger.error({ err: err?.message }, 'Failed to reach knowledge-base tick endpoint')
+  }
+}
+
 async function startBridge() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
 
@@ -194,6 +217,7 @@ async function startBridge() {
       // Start the message-lists scheduler tick (queues due lists into group_outbox,
       // which the poller above then delivers on its own next cycle).
       setInterval(tickMessageLists, MESSAGE_LIST_TICK_INTERVAL_MS)
+      setInterval(tickKnowledgeBase, KNOWLEDGE_BASE_TICK_INTERVAL_MS)
     }
   })
 
