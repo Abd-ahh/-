@@ -904,7 +904,7 @@ webhook.get('/visa-checks/pending', async (c) => {
   ).bind(STALE_CHECKING_MINUTES).run()
 
   const due = await DB.prepare(
-    `SELECT * FROM umrah_visa_checks WHERE status = 'pending' AND next_check_at <= datetime('now') ORDER BY next_check_at ASC LIMIT ?`
+    `SELECT * FROM umrah_visa_checks WHERE status = 'pending' AND datetime(next_check_at) <= datetime('now') ORDER BY next_check_at ASC LIMIT ?`
   ).bind(limit).all<any>()
   const rows = due.results || []
   if (rows.length === 0) return c.json({ checks: [] })
