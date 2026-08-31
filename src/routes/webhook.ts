@@ -941,4 +941,3 @@ webhook.get('/knowledge-base/tick', async (c) => {
 })
 
 export default webhook
-
