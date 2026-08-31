@@ -893,42 +893,41 @@ admin.post('/knowledge-base/analyze-now', async (c) => {
   if ('error' in result) return c.json(result, 400)
   return c.json({ success: true, ...result })
 })
-
-export default admin
-// ==================== Health Monitoring - إضافة جديدة ====================
+// === Health Monitoring ===
 admin.get('/health', async (c) => {
   const db = c.env.DB as any;
-  try {
-    const stuck = await db.prepare(
-      "SELECT COUNT(*) as c FROM umrah_visa_checks WHERE status='checking' AND datetime(updated_at) < datetime('now','-5 minutes')"
-    ).first() as any;
+    try {
+        const stuck = await db.prepare(
+              "SELECT COUNT(*) as c FROM umrah_visa_checks WHERE status='checking' AND datetime(updated_at) < datetime('now','-5 minutes')"
+                  ).first() as any;
 
-    const lastTick = await db.prepare(
-      "SELECT MAX(created_at) as last FROM message_list_send_log"
-    ).first() as any;
+                      const lastTick = await db.prepare(
+                            "SELECT MAX(created_at) as t FROM bridge_events ORDER BY id DESC"
+                                ).first() as any;
 
-    const todayOps = await db.prepare(
-      "SELECT status, COUNT(*) as c FROM operations WHERE date(created_at)=date('now') GROUP BY status"
-    ).all() as any;
+                                    const todayOps = await db.prepare(
+                                          "SELECT status, COUNT(*) as cnt FROM umrah_visa_checks WHERE date(created_at)=date('now') GROUP BY status"
+                                              ).all() as any;
 
-    return c.json({
-      ok: true,
-      time: new Date().toISOString(),
-      stuck_checks: stuck?.c || 0,
-      bridge_last_tick: lastTick?.last || 'never',
-      r2_enabled: !!c.env.PASSPORTS_BUCKET,
-      ops_today: todayOps.results || [],
-      status: stuck?.c > 3 ? 'warning' : 'ok'
-    });
-  } catch (e:any) {
-    return c.json({ ok: false, error: e.message }, 500);
-  }
-});
+                                                  return c.json({
+                                                        ok: true,
+                                                              time: new Date().toISOString(),
+                                                                    stuck_checks: stuck?.c || 0,
+                                                                          bridge_last_tick: lastTick?.t || null,
+                                                                                r2_enabled: !!c.env.PASSPORT_BUCKET,
+                                                                                      ops_today: todayOps.results || []
+                                                                                          });
+                                                                                            } catch (e:any) {
+                                                                                                return c.json({ ok: false, error: e.message }, 500);
+                                                                                                  }
+                                                                                                  });
 
-admin.post('/health/fix-stuck', async (c) => {
-  const db = c.env.DB as any;
-  const r = await db.prepare(
-    "UPDATE umrah_visa_checks SET status='pending', updated_at=datetime('now'), last_error='auto-fix: stuck >5min' WHERE status='checking' AND datetime(updated_at) < datetime('now','-5 minutes')"
-  ).run();
-  return c.json({ fixed: r.meta.changes });
-});
+                                                                                                  admin.post('/health/fix-stuck', async (c) => {
+                                                                                                    const db = c.env.DB as any;
+                                                                                                      const r = await db.prepare(
+                                                                                                          "UPDATE umrah_visa_checks SET status='pending', updated_at=datetime('now') WHERE status='checking' AND datetime(updated_at) < datetime('now','-5 minutes')"
+                                                                                                            ).run();
+                                                                                                              return c.json({ fixed: r.meta.changes });
+                                                                                                              });
+
+                                                                                                              export default admin
