@@ -834,7 +834,6 @@ admin.post('/staff-numbers', async (c) => {
   const { customer_id, identifier, label } = await c.req.json()
   if (!customer_id || !identifier) return c.json({ error: 'customer_id و identifier مطلوبان' }, 400)
   await addStaffNumber(DB, customer_id, identifier, label || null)
-  return c.json({ success: true })
 })
 
 admin.delete('/staff-numbers/:id', async (c) => {
