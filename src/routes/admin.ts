@@ -239,6 +239,35 @@ admin.delete('/customers/:id', async (c) => {
   return c.json({ success: true })
 })
 
+// ---------------------- Visa auto-check: admin-only enable/disable ----------------------
+// 2026-09-24 (explicit admin decision): this feature (periodic MOFA visa
+// search + PDF delivery) is no longer self-service via a WhatsApp text
+// command (see commandHandlers.ts) — it can now ONLY be toggled here, by
+// the platform admin, per office. Disabling also cancels every currently
+// pending/checking visa check for that office so nothing keeps retrying
+// in the background after being turned off.
+admin.put('/customers/:id/visa-check', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const existing = await DB.prepare('SELECT id FROM customers WHERE id = ?').bind(id).first()
+  if (!existing) return c.json({ error: 'العميل غير موجود' }, 404)
+
+  const { enabled } = await c.req.json<{ enabled: boolean }>()
+  await DB.prepare('UPDATE customers SET feature_visa_check_enabled = ? WHERE id = ?')
+    .bind(enabled ? 1 : 0, id).run()
+
+  let cancelled = 0
+  if (!enabled) {
+    const result = await DB.prepare(
+      `UPDATE umrah_visa_checks SET status='cancelled', last_error='تم الإيقاف يدوياً من قبل الإدارة', updated_at=datetime('now')
+       WHERE customer_id = ? AND status IN ('pending','checking')`
+    ).bind(id).run()
+    cancelled = result.meta.changes || 0
+  }
+
+  return c.json({ success: true, cancelled })
+})
+
 // ---------------------- Subscriptions ----------------------
 admin.post('/subscriptions', async (c) => {
   const { DB } = c.env

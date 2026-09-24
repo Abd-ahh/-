@@ -299,6 +299,20 @@ window.openCustomerDetail = async function (id) {
         </div>
 
         <div class="mb-5">
+          <h4 class="font-bold text-sm text-gray-700 mb-2">🛂 فحص التأشيرة الآلي (PDF)</h4>
+          <p class="text-xs text-gray-400 mb-2">لم يعد بإمكان أعضاء المجموعات تفعيل/إيقاف هذه الميزة من واتساب — التحكم أصبح خاصاً بالإدارة فقط. عند الإيقاف يتم إلغاء أي فحوصات معلّقة حالياً لهذا المكتب تلقائياً.</p>
+          <div class="flex items-center justify-between bg-gray-50 rounded-xl p-3">
+            <span class="text-sm font-semibold ${data.customer.feature_visa_check_enabled ? 'text-emerald-700' : 'text-gray-500'}">
+              ${data.customer.feature_visa_check_enabled ? '✅ مفعّلة حالياً' : '⛔ متوقفة حالياً'}
+            </span>
+            <button onclick="toggleVisaCheck(${id}, ${data.customer.feature_visa_check_enabled ? 0 : 1})"
+              class="text-sm font-bold px-4 py-2 rounded-lg ${data.customer.feature_visa_check_enabled ? 'bg-red-50 hover:bg-red-100 text-red-600' : 'bg-brand-600 hover:bg-brand-700 text-white'}">
+              ${data.customer.feature_visa_check_enabled ? 'إيقاف الميزة' : 'تفعيل الميزة'}
+            </button>
+          </div>
+        </div>
+
+        <div class="mb-5">
           <h4 class="font-bold text-sm text-gray-700 mb-2">الاشتراكات</h4>
           <div class="space-y-2 text-sm">
             ${data.subscriptions.map(s => `
@@ -347,6 +361,16 @@ window.saveCustomerCommands = async function (customerId) {
     el.textContent = err?.response?.data?.error || 'حدث خطأ';
     el.classList.remove('hidden');
   }
+};
+
+window.toggleVisaCheck = async function (customerId, enabled) {
+  const label = enabled ? 'تفعيل' : 'إيقاف';
+  if (!confirm(`تأكيد ${label} ميزة فحص التأشيرة الآلي لهذا المكتب؟${!enabled ? ' سيتم إلغاء كل الفحوصات المعلّقة حالياً.' : ''}`)) return;
+  const { data } = await axios.put(`${API}/customers/${customerId}/visa-check`, { enabled: !!enabled });
+  if (!enabled && data.cancelled) {
+    alert(`تم الإيقاف، وتم إلغاء ${data.cancelled} فحص تأشيرة كان معلّقاً لهذا المكتب.`);
+  }
+  openCustomerDetail(customerId);
 };
 
 window.assignSubscription = async function (customerId) {

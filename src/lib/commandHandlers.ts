@@ -31,9 +31,23 @@ export async function handleTextCommand(
   }
 
   if (cmd.type === 'toggle_feature') {
+    // 2026-09-24 (explicit admin decision): the visa auto-check feature
+    // (PDF search/delivery) is no longer controllable by WhatsApp
+    // group/conversation members via text command — it is now an
+    // ADMIN-ONLY switch managed from the dashboard (see admin.ts
+    // PUT /customers/:id/visa-check). Reject the WhatsApp command instead
+    // of silently toggling it, so offices get clear feedback.
+    if (cmd.feature === 'visa_check') {
+      return {
+        kind: 'text',
+        text: lang === 'en'
+          ? '⚠️ The visa auto-check feature can no longer be toggled from WhatsApp. Please contact the platform admin to enable or disable it for your office.'
+          : '⚠️ لم يعد بالإمكان تفعيل أو إلغاء ميزة فحص التأشيرة من واتساب. يرجى التواصل مع إدارة المنصة لتفعيلها أو إيقافها لمكتبكم.'
+      }
+    }
+
     const columnByFeature: Record<string, string> = {
       cumulative_list: 'feature_cumulative_list_enabled',
-      visa_check: 'feature_visa_check_enabled',
       auto_extract: 'feature_auto_extract_enabled'
     }
     const column = columnByFeature[cmd.feature]
@@ -85,8 +99,8 @@ export async function handleTextCommand(
     return {
       kind: 'text',
       text: lang === 'en'
-        ? '⚠️ The visa auto-check feature is not enabled. Send "تفعيل فحص التاشيره" or "فحص دوري" to enable it.'
-        : '⚠️ ميزة فحص التأشيرة غير مفعّلة. أرسل "تفعيل فحص التاشيره" أو "فحص دوري" لتفعيلها.'
+        ? '⚠️ The visa auto-check feature is not enabled for this office. Please contact the platform admin to enable it.'
+        : '⚠️ ميزة فحص التأشيرة غير مفعّلة لهذا المكتب. يرجى التواصل مع إدارة المنصة لتفعيلها.'
     }
   }
 
@@ -195,9 +209,8 @@ function buildHelpMessage(lang: 'ar' | 'en'): string {
       '• "القائمة" — show the current list',
       '',
       '🛂 *Visa auto-check (Feature 4)*',
-      '• "تفعيل فحص التاشيره" (or "فحص دوري") — enable periodic auto-check',
-      '• "الغاء فحص التاشيره" (or "الغاء الفحص الدوري") — disable',
-      '• "فحص التاشيره" — check now, once, for all pending visas',
+      '⚠️ Enabling/disabling this feature is now managed only by the platform admin (not by text command).',
+      '• "فحص التاشيره" — if already enabled for your office by the admin, check now once for all pending visas',
       '',
       '📊 *Reports*',
       '• "تقرير يومي" / "تقرير شهري" / "تقرير سنوي" — text report',
@@ -224,9 +237,8 @@ function buildHelpMessage(lang: 'ar' | 'en'): string {
     '• "القائمة" — عرض القائمة الحالية',
     '',
     '🛂 *فحص التأشيرة التلقائي (الميزة 4)*',
-    '• "تفعيل فحص التاشيره" (أو "فحص دوري") — تفعيل الفحص الدوري التلقائي',
-    '• "الغاء فحص التاشيره" (أو "الغاء الفحص الدوري") — إلغاء',
-    '• "فحص التاشيره" — فحص فوري لمرة واحدة لكل التأشيرات المعلّقة',
+    '⚠️ تفعيل أو إيقاف هذه الميزة الآن يتم فقط من قبل إدارة المنصة (لم يعد متاحاً بأمر نصي).',
+    '• "فحص التاشيره" — إذا كانت الميزة مفعّلة لمكتبكم من الإدارة، فحص فوري لمرة واحدة لكل التأشيرات المعلّقة',
     '',
     '📊 *التقارير*',
     '• "تقرير يومي" / "تقرير شهري" / "تقرير سنوي" — تقرير نصي',
