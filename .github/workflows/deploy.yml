@@ -1,6 +1,5 @@
 name: Deploy to Cloudflare Pages
 
-# ينشر تلقائياً على Cloudflare Pages مع كل تعديل يُدفع (push) إلى main.
 on:
   push:
     branches: [main]
