@@ -131,7 +131,11 @@ async function closeTransactionToSupplier(
   }
 
   await transitionTransaction(DB, transactionId, 'WAITING_HOSTING', null, 'system')
-  return `\n\n✅ تم تأكيد وإرسال المعاملة ${tx.transaction_code} إلى المورد.`
+  // Reply kept deliberately minimal per office request (2026-10-02): just
+  // "تم الرفع" — no transaction code, no agent/supplier name in the
+  // agent-facing reply. (The supplier still gets the full summary above,
+  // which is a different audience and needs the transaction code.)
+  return `\n\n✅ تم الرفع.`
 }
 
 // ---------------------- Agent group: incoming IMAGE ----------------------
@@ -176,10 +180,22 @@ export async function handleAgentGroupImage(
 
   const tx = await findOrCreateOpenTransaction(DB, customerId, conversationKey, agentId)
 
-  // A transaction holds at most one iqama (spec section 3) — if a second
-  // iqama arrives, replace the previous one rather than duplicating.
+  // Umrah transaction composition rule (office requirement, 2026-10-02):
+  // - 1 to 5 PASSPORTS per transaction (image or PDF)
+  // - exactly 1 IQAMA per transaction (image or PDF)
+  // A second iqama replaces the previous one (never duplicates — a
+  // transaction only ever has one). A 6th passport is rejected outright
+  // rather than silently accepted, so the office notices and opens a new
+  // transaction for the extra traveler instead of overflowing this one.
   if (docType === 'iqama') {
     await DB.prepare(`DELETE FROM transaction_people WHERE transaction_id = ? AND document_type = 'iqama'`).bind(tx.id).run()
+  } else {
+    const passportCount = await DB.prepare(
+      `SELECT COUNT(*) as cnt FROM transaction_people WHERE transaction_id = ? AND document_type = 'passport'`
+    ).bind(tx.id).first<{ cnt: number }>()
+    if ((passportCount?.cnt || 0) >= 5) {
+      return `⚠️ المعاملة ${tx.transaction_code} تحتوي بالفعل على 5 جوازات (الحد الأقصى). يرجى إنهاء هذه المعاملة أو فتح معاملة جديدة لهذا الشخص.`
+    }
   }
 
   const opInsert = await DB.prepare(

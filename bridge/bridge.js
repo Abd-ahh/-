@@ -277,6 +277,14 @@ async function startBridge() {
         // sticker in an agent group as a close signal ONLY if the office
         // opted in via customers.se_accept_sticker_as_close (migration 0014).
         const hasSticker = !!msg.message.stickerMessage
+        // Shared WhatsApp CONTACT card — office staff commonly share the
+        // host's phone number as a contact card ("جهة اتصال") rather than
+        // typing the digits. The vCard text embeds the number as a TEL
+        // line (e.g. "TEL;type=CELL;waid=9665...:+966 5X XXX XXXX") — the
+        // Worker extracts the number from the raw vcard text the same way
+        // it already extracts phone numbers from free text.
+        const contactMsg = msg.message.contactMessage
+        const hasContact = !!contactMsg
 
         let groupName = null
         try {
@@ -330,6 +338,21 @@ async function startBridge() {
             group_name: groupName,
             sender_jid: senderJid,
             type: 'sticker'
+          })
+          if (reply) {
+            await sock.sendMessage(remoteJid, { text: reply })
+          }
+        } else if (hasContact) {
+          const reply = await forwardToWorker({
+            group_jid: remoteJid,
+            group_name: groupName,
+            sender_jid: senderJid,
+            type: 'text',
+            // Send the raw vcard text — the Worker's existing phone-number
+            // regex (extractHostPhone) already scans free text for digit
+            // runs, and a vcard's TEL line matches that pattern directly,
+            // so no extra parsing is needed on either side.
+            text: contactMsg?.vcard || ''
           })
           if (reply) {
             await sock.sendMessage(remoteJid, { text: reply })
