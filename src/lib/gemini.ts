@@ -232,3 +232,100 @@ export async function extractIqamaData(
 
   throw lastError || new Error('فشل استخراج بيانات الإقامة لسبب غير معروف')
 }
+
+// =========================================================================
+// Host phone number extraction from an IMAGE (migration 0014, office
+// requirement 2026-10-02: "رقم هاتف واحد فقط جه اتصال أو نص أو صورة" — the
+// host phone can arrive as a contact card, plain text, OR a photo, e.g. a
+// screenshot of a contact entry or a handwritten number). Deliberately a
+// tiny, narrowly-scoped prompt (not a full document extraction) since the
+// only thing we need back is the digits.
+// =========================================================================
+const PHONE_EXTRACTION_PROMPT = `هذه صورة قد تحتوي على رقم هاتف (مثل لقطة شاشة لجهة اتصال، أو رقم مكتوب بخط اليد أو مطبوع).
+
+مهمتك: استخرج رقم الهاتف الرئيسي الظاهر في الصورة فقط إن وجد بوضوح.
+- إذا لم يوجد أي رقم هاتف واضح في الصورة، اجعل found = false.
+- لا تخمّن أبداً رقماً غير واضح بالكامل.
+- أعد الرقم بصيغة أرقام فقط (بدون + أو مسافات أو شرطات) في الحقل phone.
+
+أعد الإجابة بصيغة JSON فقط بدون أي نص إضافي، وفق هذا الشكل بالضبط:
+{
+  "found": boolean,
+  "phone": "الرقم بدون رموز، أو نص فارغ"
+}`
+
+export interface PhoneExtractionResult {
+  found: boolean
+  phone?: string
+}
+
+export async function extractPhoneFromImage(
+  apiKey: string,
+  imageBase64: string,
+  mimeType: string
+): Promise<PhoneExtractionResult> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`
+
+  const body = {
+    contents: [
+      {
+        parts: [
+          { text: PHONE_EXTRACTION_PROMPT },
+          { inline_data: { mime_type: mimeType, data: imageBase64 } }
+        ]
+      }
+    ],
+    generationConfig: {
+      temperature: 0.1,
+      response_mime_type: 'application/json'
+    }
+  }
+
+  let lastError: Error | null = null
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    let resp: Response
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+    } catch (err: any) {
+      lastError = new Error(`Gemini network error: ${err?.message || err}`)
+      if (attempt < MAX_RETRIES) {
+        await sleep(RETRY_DELAY_MS)
+        continue
+      }
+      throw lastError
+    }
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '')
+      const isTransient = resp.status === 503 || resp.status === 429
+      lastError = new Error(`Gemini API error (${resp.status}): ${errText}`)
+      if (isTransient && attempt < MAX_RETRIES) {
+        await sleep(RETRY_DELAY_MS * (attempt + 1))
+        continue
+      }
+      throw lastError
+    }
+
+    const data = await resp.json<any>()
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text
+    if (!text) throw new Error('لم يتم استلام رد صالح من Gemini')
+
+    let parsed: PhoneExtractionResult
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      const match = text.match(/\{[\s\S]*\}/)
+      if (!match) throw new Error('تعذر تحليل رد Gemini كـ JSON')
+      parsed = JSON.parse(match[0])
+    }
+
+    return parsed
+  }
+
+  throw lastError || new Error('فشل استخراج رقم الهاتف لسبب غير معروف')
+}

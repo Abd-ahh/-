@@ -585,21 +585,26 @@ webhook.post('/bridge/message', async (c) => {
     const seCustomer = await DB.prepare('SELECT * FROM customers WHERE id = ?').bind(existingGroup.customer_id).first<any>()
     if (!seCustomer?.feature_smart_employee_enabled) return c.json({})
 
+    // Shared supplier-conversation-key resolution (same pattern used by the
+    // text/image branches below) — needed by BOTH the document branch (a
+    // PDF may turn out to be a passport/iqama, which can trigger an
+    // immediate close via advanceAfterDataReceived) and the sticker branch.
+    let supplierConvKey: string | null = null
+    if (existingGroup.group_type === 'agent' && existingGroup.agent_id) {
+      const agentRow = await DB.prepare('SELECT default_supplier_id FROM agents WHERE id = ?').bind(existingGroup.agent_id).first<{ default_supplier_id: number | null }>()
+      if (agentRow?.default_supplier_id) {
+        const supplierRow = await DB.prepare('SELECT conversation_key FROM suppliers WHERE id = ?').bind(agentRow.default_supplier_id).first<{ conversation_key: string | null }>()
+        supplierConvKey = supplierRow?.conversation_key || null
+      }
+    }
+
     let seReply: string | null = null
     if (type === 'document' && document_base64 && existingGroup.group_type === 'agent') {
       seReply = await handleAgentGroupDocument(
-        { DB, PASSPORTS_BUCKET: c.env.PASSPORTS_BUCKET }, existingGroup.customer_id, group_jid, existingGroup.agent_id,
-        document_base64, mime_type || 'application/octet-stream', filename || 'document', text || ''
+        { DB, PASSPORTS_BUCKET: c.env.PASSPORTS_BUCKET, GEMINI_API_KEY }, existingGroup.customer_id, group_jid, sender_jid,
+        existingGroup.agent_id, supplierConvKey, document_base64, mime_type || 'application/octet-stream', filename || 'document', text || ''
       ).catch((err) => { console.error('handleAgentGroupDocument failed', err); return null })
     } else if (type === 'sticker' && existingGroup.group_type === 'agent' && seCustomer.se_accept_sticker_as_close) {
-      let supplierConvKey: string | null = null
-      if (existingGroup.agent_id) {
-        const agentRow = await DB.prepare('SELECT default_supplier_id FROM agents WHERE id = ?').bind(existingGroup.agent_id).first<{ default_supplier_id: number | null }>()
-        if (agentRow?.default_supplier_id) {
-          const supplierRow = await DB.prepare('SELECT conversation_key FROM suppliers WHERE id = ?').bind(agentRow.default_supplier_id).first<{ conversation_key: string | null }>()
-          supplierConvKey = supplierRow?.conversation_key || null
-        }
-      }
       seReply = await handleAgentGroupSticker(
         { DB, PASSPORTS_BUCKET: c.env.PASSPORTS_BUCKET }, existingGroup.customer_id, group_jid, supplierConvKey
       ).catch((err) => { console.error('handleAgentGroupSticker failed', err); return null })

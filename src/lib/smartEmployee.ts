@@ -8,7 +8,7 @@
 // migration) is completely unaffected; none of this file's code path is
 // ever reached for it.
 // =========================================================================
-import { extractPassportData, extractIqamaData } from './gemini'
+import { extractPassportData, extractIqamaData, extractPhoneFromImage } from './gemini'
 import { buildConversationKey, extractHostPhone, detectTransactionIntent, extractTransactionCode, detectSupplierReplyIntent } from './commands'
 import { deliverToConversation } from './deliver'
 import {
@@ -138,19 +138,26 @@ async function closeTransactionToSupplier(
   return `\n\n✅ تم الرفع.`
 }
 
-// ---------------------- Agent group: incoming IMAGE ----------------------
-// Tries passport extraction first; if the image isn't a passport, tries
-// iqama extraction. Silent (no reply) if it's neither — same "stay quiet on
-// unrelated images" philosophy as the existing bot pipeline.
-export async function handleAgentGroupImage(
+// ---------------------- Agent group: identity document (shared core) ----------------------
+// Shared by handleAgentGroupImage AND handleAgentGroupDocument — a passport
+// or iqama can arrive either as a photo (imageMessage) OR as a PDF/scan
+// (documentMessage) per office requirement (2026-10-02): "جواز من 1 إلى 5
+// جوازات... ممكن يكونوا صور أو صيغات PDF، اقامة واحدة فقط صورة أو PDF".
+// Gemini's inline_data accepts PDF bytes exactly like image bytes, so the
+// same extraction call works for both — only the stored file extension
+// (imageKey) and R2 content-type differ.
+// Tries passport extraction first; if it isn't a passport, tries iqama.
+// Returns null (stay silent) if it's neither — e.g. a document/image sent
+// that turns out to be the "الزمام" manifest rather than an ID page; the
+// caller falls back to storing it as a plain attachment in that case.
+async function processAgentIdentityMedia(
   deps: SmartEmployeeDeps,
   customerId: number,
-  customer: any,
   groupJid: string,
   senderJid: string,
   agentId: number | null,
   defaultSupplierConversationKey: string | null,
-  imageBase64: string,
+  mediaBase64: string,
   mimeType: string
 ): Promise<string | null> {
   const { DB, PASSPORTS_BUCKET, GEMINI_API_KEY } = deps
@@ -160,22 +167,22 @@ export async function handleAgentGroupImage(
   let docType: 'passport' | 'iqama' | null = null
   let fields: any = null
 
-  const passportResult = await extractPassportData(GEMINI_API_KEY, imageBase64, mimeType).catch(() => null)
+  const passportResult = await extractPassportData(GEMINI_API_KEY, mediaBase64, mimeType).catch(() => null)
   if (passportResult?.is_passport) {
     docType = 'passport'
     fields = passportResult
   } else {
-    const iqamaResult = await extractIqamaData(GEMINI_API_KEY, imageBase64, mimeType).catch(() => null)
+    const iqamaResult = await extractIqamaData(GEMINI_API_KEY, mediaBase64, mimeType).catch(() => null)
     if (iqamaResult?.is_iqama) {
       docType = 'iqama'
       fields = iqamaResult
     }
   }
 
-  if (!docType || !fields) return null // not a recognizable document -> stay silent
+  if (!docType || !fields) return null // not a recognizable ID document -> let caller decide fallback
 
   if (!fields.is_clear) {
-    return `⚠️ الصورة غير واضحة بشكل كافٍ: ${fields.clarity_reason || 'يرجى إرسال صورة أوضح.'}`
+    return `⚠️ المستند غير واضح بشكل كافٍ: ${fields.clarity_reason || 'يرجى إرسال نسخة أوضح.'}`
   }
 
   const tx = await findOrCreateOpenTransaction(DB, customerId, conversationKey, agentId)
@@ -202,10 +209,11 @@ export async function handleAgentGroupImage(
     `INSERT INTO operations (customer_id, sender_phone, group_jid, status, source) VALUES (?, ?, ?, 'success', 'smart_employee_agent')`
   ).bind(customerId, senderJid, groupJid).run()
   const operationId = opInsert.meta.last_row_id
-  const imageKey = `smart-employee/${customerId}/${tx.id}/${operationId}-${Date.now()}.jpg`
+  const isPdf = mimeType === 'application/pdf'
+  const mediaKey = `smart-employee/${customerId}/${tx.id}/${operationId}-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`
   if (PASSPORTS_BUCKET) {
-    const bytes = Uint8Array.from(atob(imageBase64), (c) => c.charCodeAt(0))
-    PASSPORTS_BUCKET.put(imageKey, bytes, { httpMetadata: { contentType: mimeType } }).catch(() => {})
+    const bytes = Uint8Array.from(atob(mediaBase64), (c) => c.charCodeAt(0))
+    PASSPORTS_BUCKET.put(mediaKey, bytes, { httpMetadata: { contentType: mimeType } }).catch(() => {})
   }
 
   const confidence = typeof fields.confidence === 'number' ? fields.confidence : null
@@ -221,7 +229,7 @@ export async function handleAgentGroupImage(
     ).bind(
       tx.id, operationId, fields.full_name_ar || null, fields.full_name_en || null, fields.passport_number || null,
       fields.nationality || null, fields.date_of_birth || null, fields.date_of_expiry || null, fields.gender || null,
-      confidence, imageKey, personStatus
+      confidence, mediaKey, personStatus
     ).run()
   } else {
     await DB.prepare(
@@ -232,7 +240,7 @@ export async function handleAgentGroupImage(
     ).bind(
       tx.id, operationId, fields.full_name_ar || null, fields.full_name_en || null, fields.id_number || null,
       fields.nationality || null, fields.date_of_birth || null, fields.date_of_expiry || null, fields.gender || null,
-      fields.profession || null, fields.sponsor || null, confidence, imageKey, personStatus
+      fields.profession || null, fields.sponsor || null, confidence, mediaKey, personStatus
     ).run()
   }
 
@@ -241,8 +249,66 @@ export async function handleAgentGroupImage(
     return `⚠️ تم استلام المستند لكن درجة الثقة منخفضة — تم تحويل المعاملة ${tx.transaction_code} للمراجعة اليدوية.`
   }
 
+  // Reply kept deliberately minimal per office request (2026-10-02): no
+  // name/transaction-code recap needed here — just confirm receipt. The
+  // transaction code still surfaces later in the final "تم الرفع" / review
+  // messages where it's actually actionable.
   const docLabel = docType === 'iqama' ? 'إقامة' : 'جواز'
-  let reply = `✅ تم استلام ${docLabel}: ${fields.full_name_ar || ''} — معاملة ${tx.transaction_code}`
+  let reply = `✅ تم استلام ${docLabel}.`
+  reply += await advanceAfterDataReceived(DB, tx, false, defaultSupplierConversationKey, PASSPORTS_BUCKET)
+  return reply
+}
+
+// ---------------------- Agent group: incoming IMAGE ----------------------
+export async function handleAgentGroupImage(
+  deps: SmartEmployeeDeps,
+  customerId: number,
+  customer: any,
+  groupJid: string,
+  senderJid: string,
+  agentId: number | null,
+  defaultSupplierConversationKey: string | null,
+  imageBase64: string,
+  mimeType: string
+): Promise<string | null> {
+  const idReply = await processAgentIdentityMedia(deps, customerId, groupJid, senderJid, agentId, defaultSupplierConversationKey, imageBase64, mimeType)
+  if (idReply !== null) return idReply // recognized as passport/iqama (or a clarity warning) -> handled
+
+  // Not a passport/iqama — office requirement (2026-10-02): "رقم هاتف واحد
+  // فقط جه اتصال أو نص أو صورة", the host phone may also arrive as a PHOTO
+  // (e.g. a screenshot of a contact entry or a handwritten number) rather
+  // than a contact card or typed text. Try a narrow phone-only extraction
+  // before giving up silently.
+  return attemptHostPhoneFromImage(deps, customerId, groupJid, agentId, defaultSupplierConversationKey, imageBase64, mimeType)
+}
+
+// ---------------------- Agent group: host phone via IMAGE (fallback) ----------------------
+// Only reached once an incoming agent-group image has already been ruled
+// out as a passport/iqama scan (processAgentIdentityMedia returned null).
+// Mirrors the "host phone via text" handling in handleAgentGroupText —
+// same reply shape, same advanceAfterDataReceived call — just sourced from
+// a narrow Gemini phone-in-image extraction instead of a regex match.
+async function attemptHostPhoneFromImage(
+  deps: SmartEmployeeDeps,
+  customerId: number,
+  groupJid: string,
+  agentId: number | null,
+  defaultSupplierConversationKey: string | null,
+  imageBase64: string,
+  mimeType: string
+): Promise<string | null> {
+  const { DB, PASSPORTS_BUCKET, GEMINI_API_KEY } = deps
+  if (!GEMINI_API_KEY) return null
+
+  const phoneResult = await extractPhoneFromImage(GEMINI_API_KEY, imageBase64, mimeType).catch(() => null)
+  const phone = phoneResult?.found ? (phoneResult.phone || '').replace(/\D/g, '') : ''
+  if (!phone || phone.length < 8 || phone.length > 15) return null // no clear phone in the image -> stay silent
+
+  const conversationKey = buildConversationKey({ group_jid: groupJid })
+  const tx = await findOrCreateOpenTransaction(DB, customerId, conversationKey, agentId)
+  await DB.prepare('UPDATE transactions SET host_phone = ?, updated_at = datetime(\'now\') WHERE id = ?').bind(phone, tx.id).run()
+
+  let reply = `📞 تم تسجيل رقم المضيف للمعاملة ${tx.transaction_code}`
   reply += await advanceAfterDataReceived(DB, tx, false, defaultSupplierConversationKey, PASSPORTS_BUCKET)
   return reply
 }
@@ -323,22 +389,40 @@ export async function handleAgentGroupText(
 // none exists yet, same as a host-phone text message would), and the
 // attachment is forwarded to the supplier automatically when the
 // transaction closes (see closeTransactionToSupplier).
+// A document (PDF) can be EITHER a passport/iqama scan OR the "الزمام"
+// manifest — office requirement (2026-10-02): "جواز... ممكن يكونوا صور او
+// صيغات pdf" / "اقامه واحدة فقط صورة أو pdf". So a PDF is first tried
+// through the same identity-extraction pipeline as an image; only if
+// Gemini doesn't recognize it as a passport/iqama does it fall back to
+// being stored as a plain "الزمام" attachment (never OCR'd).
 export async function handleAgentGroupDocument(
-  deps: { DB: D1Database; PASSPORTS_BUCKET?: R2Bucket },
+  deps: SmartEmployeeDeps,
   customerId: number,
   groupJid: string,
+  senderJid: string,
   agentId: number | null,
+  defaultSupplierConversationKey: string | null,
   documentBase64: string,
   mimeType: string,
   filename: string,
   caption: string
 ): Promise<string | null> {
-  const { DB, PASSPORTS_BUCKET } = deps
+  const { DB, PASSPORTS_BUCKET, GEMINI_API_KEY } = deps
+
+  // Only PDFs are worth trying as an identity document — other document
+  // types (e.g. .docx/.xlsx "الزمام" manifests) go straight to attachment
+  // storage, Gemini's inline_data doesn't support those formats anyway.
+  if (mimeType === 'application/pdf' && GEMINI_API_KEY) {
+    const idReply = await processAgentIdentityMedia(
+      deps, customerId, groupJid, senderJid, agentId, defaultSupplierConversationKey, documentBase64, mimeType
+    ).catch((err) => { console.error('processAgentIdentityMedia (PDF) failed', err); return null })
+    if (idReply) return idReply // recognized as passport/iqama -> handled, don't also store as a manifest attachment
+  }
+
+  // Fallback: plain "الزمام" manifest attachment (not OCR'd) — reuses the
+  // same "open transaction" matching used for text/image so it attaches to
+  // whichever transaction is currently being built in this conversation.
   const conversationKey = buildConversationKey({ group_jid: groupJid })
-  // Reuse the same "open transaction" matching used for text/image so the
-  // document attaches to whichever transaction is currently being built in
-  // this conversation (agents commonly send the document first, before any
-  // photo — see findOrCreateOpenTransaction).
   const tx = await findOrCreateOpenTransaction(DB, customerId, conversationKey, agentId)
 
   let r2Key: string | null = null
@@ -352,7 +436,7 @@ export async function handleAgentGroupDocument(
     `INSERT INTO transaction_attachments (transaction_id, filename, mime_type, r2_key, caption, source) VALUES (?, ?, ?, ?, ?, 'agent')`
   ).bind(tx.id, filename, mimeType, r2Key, caption || null).run()
 
-  return `📎 تم استلام المستند "${filename}" وربطه بمعاملة ${tx.transaction_code}.`
+  return `📎 تم استلام المستند.`
 }
 
 // ---------------------- Agent group: incoming STICKER (close signal) ----------------------
