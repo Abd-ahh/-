@@ -1959,7 +1959,7 @@ async function renderSeAgents(body) {
       <table class="w-full text-sm">
         <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
           <th class="p-4 font-medium">الاسم</th><th class="p-4 font-medium">الهاتف</th>
-          <th class="p-4 font-medium">المورد الافتراضي</th><th class="p-4 font-medium"></th>
+          <th class="p-4 font-medium">المورد الافتراضي</th><th class="p-4 font-medium">مجموعة الواتساب</th><th class="p-4 font-medium"></th>
         </tr></thead>
         <tbody>
           ${seAgentsCache.map(a => `
@@ -1967,11 +1967,15 @@ async function renderSeAgents(body) {
               <td class="p-4 font-semibold">${a.name}</td>
               <td class="p-4 text-gray-500">${a.phone || '-'}</td>
               <td class="p-4 text-gray-500">${a.default_supplier_name || '-'}</td>
+              <td class="p-4">${a.conversation_key
+                ? '<span class="text-green-600 text-xs font-bold"><i class="fa-solid fa-circle-check ml-1"></i>مرتبطة</span>'
+                : '<span class="text-amber-600 text-xs font-bold"><i class="fa-solid fa-triangle-exclamation ml-1"></i>غير مرتبطة — اربطها من تبويب "المجموعات"</span>'}</td>
               <td class="p-4"><button onclick="deleteSeAgent(${a.id})" class="text-red-500 hover:underline text-xs font-bold">حذف</button></td>
-            </tr>`).join('') || '<tr><td colspan="4" class="p-8 text-center text-gray-400">لا يوجد وكلاء بعد</td></tr>'}
+            </tr>`).join('') || '<tr><td colspan="5" class="p-8 text-center text-gray-400">لا يوجد وكلاء بعد</td></tr>'}
         </tbody>
       </table>
     </div>
+    <p class="text-xs text-gray-400 mt-3"><i class="fa-solid fa-circle-info ml-1"></i>بعد إضافة الوكيل، لازم تربطه بمجموعة الواتساب الخاصة فيه من تبويب "المجموعات" حتى يستقبل البوت رسائله.</p>
   `;
 }
 
@@ -2015,18 +2019,22 @@ async function renderSeSuppliers(body) {
     <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
       <table class="w-full text-sm">
         <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
-          <th class="p-4 font-medium">الاسم</th><th class="p-4 font-medium">الهاتف</th><th class="p-4 font-medium"></th>
+          <th class="p-4 font-medium">الاسم</th><th class="p-4 font-medium">الهاتف</th><th class="p-4 font-medium">مجموعة الواتساب</th><th class="p-4 font-medium"></th>
         </tr></thead>
         <tbody>
           ${seSuppliersCache.map(s => `
             <tr class="border-b border-gray-50">
               <td class="p-4 font-semibold">${s.name}</td>
               <td class="p-4 text-gray-500">${s.phone || '-'}</td>
+              <td class="p-4">${s.conversation_key
+                ? '<span class="text-green-600 text-xs font-bold"><i class="fa-solid fa-circle-check ml-1"></i>مرتبطة</span>'
+                : '<span class="text-amber-600 text-xs font-bold"><i class="fa-solid fa-triangle-exclamation ml-1"></i>غير مرتبطة — اربطها من تبويب "المجموعات"</span>'}</td>
               <td class="p-4"><button onclick="deleteSeSupplier(${s.id})" class="text-red-500 hover:underline text-xs font-bold">حذف</button></td>
-            </tr>`).join('') || '<tr><td colspan="3" class="p-8 text-center text-gray-400">لا يوجد موردون بعد</td></tr>'}
+            </tr>`).join('') || '<tr><td colspan="4" class="p-8 text-center text-gray-400">لا يوجد موردون بعد</td></tr>'}
         </tbody>
       </table>
     </div>
+    <p class="text-xs text-gray-400 mt-3"><i class="fa-solid fa-circle-info ml-1"></i>بعد إضافة المورد، لازم تربطه بمجموعة الواتساب الخاصة فيه من تبويب "المجموعات" حتى يستلم معاملات الوكلاء.</p>
   `;
 }
 

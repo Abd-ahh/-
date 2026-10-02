@@ -11,6 +11,7 @@ import {
   updateMessageList, deleteMessageList
 } from '../lib/messageLists'
 import { listStaffNumbers, addStaffNumber, removeStaffNumber, runKnowledgeBaseAnalysis } from '../lib/knowledgeBase'
+import { buildConversationKey } from '../lib/commands'
 import {
   listAgents, createAgent, updateAgent, deleteAgent,
   listSuppliers, createSupplier, updateSupplier, deleteSupplier,
@@ -1083,9 +1084,45 @@ admin.put('/whatsapp-groups/:id/role', async (c) => {
   if (!group_type || !['bot', 'agent', 'supplier'].includes(group_type)) {
     return c.json({ error: 'group_type غير صالح' }, 400)
   }
+
+  const group = await DB.prepare('SELECT group_jid, agent_id as old_agent_id, supplier_id as old_supplier_id FROM whatsapp_groups WHERE id = ?')
+    .bind(id).first<{ group_jid: string; old_agent_id: number | null; old_supplier_id: number | null } | null>()
+
   await DB.prepare(
     `UPDATE whatsapp_groups SET group_type = ?, agent_id = ?, supplier_id = ?, updated_at = datetime('now') WHERE id = ?`
   ).bind(group_type, agent_id || null, supplier_id || null, id).run()
+
+  // Auto-sync agents.conversation_key / suppliers.conversation_key (migration
+  // 0013/0014 reads these directly — e.g. closeTransactionToSupplier looks up
+  // the agent's default_supplier_id -> suppliers.conversation_key to know
+  // where to deliver the transaction summary). The admin UI only exposes
+  // "classify this WhatsApp group as X's group" (this endpoint), with no
+  // separate conversation_key field to fill in by hand — so this is the one
+  // and only place that value gets set, computed from the group being
+  // classified here, in the exact 'grp:<group_jid>' format buildConversationKey
+  // produces. Keeps this a zero-extra-step flow for the admin.
+  if (group?.group_jid) {
+    const conversationKey = buildConversationKey({ group_jid: group.group_jid })
+
+    // Clear the stale link first if this group used to point at a
+    // different agent/supplier than it does now — otherwise that old
+    // record would keep claiming a group it's no longer classified as.
+    if (group.old_agent_id && group.old_agent_id !== agent_id) {
+      await DB.prepare(`UPDATE agents SET conversation_key = NULL, updated_at = datetime('now') WHERE id = ? AND conversation_key = ?`)
+        .bind(group.old_agent_id, conversationKey).run()
+    }
+    if (group.old_supplier_id && group.old_supplier_id !== supplier_id) {
+      await DB.prepare(`UPDATE suppliers SET conversation_key = NULL, updated_at = datetime('now') WHERE id = ? AND conversation_key = ?`)
+        .bind(group.old_supplier_id, conversationKey).run()
+    }
+
+    if (group_type === 'agent' && agent_id) {
+      await DB.prepare(`UPDATE agents SET conversation_key = ?, updated_at = datetime('now') WHERE id = ?`).bind(conversationKey, agent_id).run()
+    } else if (group_type === 'supplier' && supplier_id) {
+      await DB.prepare(`UPDATE suppliers SET conversation_key = ?, updated_at = datetime('now') WHERE id = ?`).bind(conversationKey, supplier_id).run()
+    }
+  }
+
   return c.json({ success: true })
 })
 
