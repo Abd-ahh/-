@@ -56,6 +56,13 @@ export interface CustomerRow {
   // Cumulative running list of extracted fields per conversation (feature 2).
   cumulative_list_fields: string | null // JSON array of field keys, null = default [full_name_ar, passport_number]
   cumulative_list_reset_hours: number
+  // ---------------------- Smart Employee (الموظف الذكي, migration 0013) ----------------------
+  // Master opt-in: everything in transactions.ts/agents/suppliers stays
+  // completely inert for an office until the admin explicitly enables it.
+  feature_smart_employee_enabled: number
+  followup_confirmation_minutes: number
+  followup_hosting_minutes: number
+  followup_visa_minutes: number
   created_at: string
 }
 
@@ -138,6 +145,14 @@ export interface WhatsAppGroupRow {
   group_name: string | null
   customer_id: number
   activated_by_jid: string | null
+  // Smart Employee (migration 0013): classifies a linked group's role.
+  // 'bot' (default) = today's only behavior, fully unchanged (generic
+  // passport-extraction group). 'agent' = this group is where an agent
+  // sends passport/iqama photos + host number to build transactions.
+  // 'supplier' = transactions are forwarded here for hosting/visa execution.
+  group_type: 'bot' | 'agent' | 'supplier'
+  agent_id: number | null
+  supplier_id: number | null
   created_at: string
   updated_at: string
 }
@@ -311,4 +326,168 @@ export interface MessageListSendLogRow {
   error: string | null
   created_at: string
   updated_at: string
+}
+
+// =========================================================================
+// "الموظف الذكي" (Smart Employee, migration 0013) — Umrah transactions
+// module: agents, suppliers, transactions, transaction people, follow-up
+// tasks and the generic audit log. See migrations/0013_add_smart_employee_core.sql
+// for full design rationale.
+// =========================================================================
+
+export interface AgentRow {
+  id: number
+  customer_id: number
+  name: string
+  conversation_key: string | null
+  phone: string | null
+  notes: string | null
+  default_supplier_id: number | null
+  is_active: number
+  created_at: string
+  updated_at: string
+}
+
+export interface SupplierRow {
+  id: number
+  customer_id: number
+  name: string
+  conversation_key: string | null
+  phone: string | null
+  notes: string | null
+  is_active: number
+  created_at: string
+  updated_at: string
+}
+
+// Full transaction lifecycle state machine (spec document section 7).
+// See src/lib/transactions.ts for the allowed transition map and the
+// natural-language command -> transition mapping.
+export type TransactionStatus =
+  | 'NEW'
+  | 'RECEIVED_FROM_AGENT'
+  | 'WAITING_AGENT_CONFIRMATION'
+  | 'SENT_TO_SUPPLIER'
+  | 'WAITING_HOSTING'
+  | 'HOSTING_RECEIVED'
+  | 'HOSTING_SENT_TO_AGENT'
+  | 'VISA_WAITING'
+  | 'VISA_RECEIVED'
+  | 'VISA_SENT_TO_AGENT'
+  | 'COMPLETED'
+  | 'NEEDS_REVIEW'
+  | 'MISSING_DOCUMENT'
+  | 'WRONG_PERSON'
+  | 'DUPLICATE_DOCUMENT'
+  | 'FAILED_TRANSFER'
+  | 'CANCELLED'
+
+export interface TransactionRow {
+  id: number
+  customer_id: number
+  transaction_code: string // e.g. UMR-260001
+  conversation_key: string
+  agent_id: number | null
+  supplier_id: number | null
+  status: TransactionStatus
+  host_phone: string | null
+  host_name: string | null
+  notes: string | null
+  needs_review_reason: string | null
+  confirmed_at: string | null
+  sent_to_supplier_at: string | null
+  hosting_received_at: string | null
+  hosting_sent_to_agent_at: string | null
+  visa_received_at: string | null
+  visa_sent_to_agent_at: string | null
+  completed_at: string | null
+  cancelled_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type TransactionPersonDocType = 'passport' | 'iqama'
+export type TransactionPersonStatus = 'extracted' | 'needs_review' | 'confirmed'
+
+export interface TransactionPersonRow {
+  id: number
+  transaction_id: number
+  operation_id: number | null
+  document_type: TransactionPersonDocType
+  full_name_ar: string | null
+  full_name_en: string | null
+  document_number: string | null
+  nationality: string | null
+  date_of_birth: string | null
+  date_of_issue: string | null
+  date_of_expiry: string | null
+  place_of_issue: string | null
+  gender: string | null
+  profession: string | null // iqama-only
+  sponsor: string | null // iqama-only
+  mrz_raw: string | null
+  confidence: number | null
+  image_key: string | null
+  status: TransactionPersonStatus
+  review_reason: string | null
+  created_at: string
+}
+
+// Shape returned by Gemini for an iqama/residency document extraction
+// (see gemini.ts extractIqamaData). Mirrors PassportExtractionResult's
+// is_passport/is_clear contract so both can share the same calling pattern.
+export interface IqamaExtractionResult {
+  is_iqama: boolean
+  is_clear: boolean
+  clarity_reason?: string
+  full_name_ar?: string
+  full_name_en?: string
+  id_number?: string
+  nationality?: string
+  date_of_birth?: string
+  date_of_expiry?: string
+  profession?: string
+  sponsor?: string
+  gender?: string
+  confidence?: number
+}
+
+export interface TransactionStatusLogRow {
+  id: number
+  transaction_id: number
+  from_status: string | null
+  to_status: string
+  reason: string | null
+  changed_by: string
+  created_at: string
+}
+
+export type FollowUpTaskKind = 'hosting_followup' | 'visa_followup' | 'agent_confirmation_reminder'
+export type FollowUpTaskStatus = 'pending' | 'sent' | 'cancelled'
+
+export interface FollowUpTaskRow {
+  id: number
+  transaction_id: number
+  customer_id: number
+  kind: FollowUpTaskKind
+  watched_status: TransactionStatus
+  status: FollowUpTaskStatus
+  due_at: string
+  attempt_count: number
+  message_text: string
+  target_conversation_key: string
+  created_at: string
+  updated_at: string
+}
+
+export interface AuditLogRow {
+  id: number
+  actor_type: 'admin' | 'customer' | 'system'
+  actor_id: number | null
+  actor_label: string | null
+  action: string
+  entity_type: string | null
+  entity_id: number | null
+  details: string | null
+  created_at: string
 }

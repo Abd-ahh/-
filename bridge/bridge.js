@@ -163,6 +163,29 @@ async function tickKnowledgeBase() {
   }
 }
 
+// Smart Employee (الموظف الذكي) follow-up reminders — same tick pattern,
+// checked once a minute (follow-up delays are measured in tens of minutes,
+// so this granularity is more than enough while staying cheap).
+const FOLLOW_UP_TICK_INTERVAL_MS = parseInt(process.env.FOLLOW_UP_TICK_INTERVAL_MS || '60000', 10)
+
+async function tickFollowUp() {
+  try {
+    const resp = await fetch(`${WORKER_URL}/webhook/follow-up/tick`, {
+      headers: { 'X-Bridge-Secret': BRIDGE_SECRET }
+    })
+    if (!resp.ok) {
+      logger.error({ status: resp.status }, 'follow-up tick failed')
+      return
+    }
+    const data = await resp.json()
+    if (data?.sent > 0 || data?.failed > 0) {
+      logger.info(data, 'follow-up tick done')
+    }
+  } catch (err) {
+    logger.error({ err: err?.message }, 'Failed to reach follow-up tick endpoint')
+  }
+}
+
 async function startBridge() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
 
@@ -218,6 +241,7 @@ async function startBridge() {
       // which the poller above then delivers on its own next cycle).
       setInterval(tickMessageLists, MESSAGE_LIST_TICK_INTERVAL_MS)
       setInterval(tickKnowledgeBase, KNOWLEDGE_BASE_TICK_INTERVAL_MS)
+      setInterval(tickFollowUp, FOLLOW_UP_TICK_INTERVAL_MS)
     }
   })
 
@@ -262,7 +286,12 @@ async function startBridge() {
             sender_jid: senderJid,
             type: 'image',
             image_base64: base64,
-            mime_type: mimeType
+            mime_type: mimeType,
+            // Caption text, used by the Smart Employee supplier-image
+            // handler to match a transaction code mentioned alongside the
+            // photo (e.g. "UMR-260001" as the image caption). Harmless/
+            // unused by the regular passport-extraction group path.
+            text: msg.message.imageMessage?.caption || ''
           })
           if (reply) {
             await sock.sendMessage(remoteJid, { text: reply })

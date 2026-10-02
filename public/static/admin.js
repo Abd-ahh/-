@@ -95,7 +95,7 @@ const titles = {
   overview: 'نظرة عامة', customers: 'العملاء', packages: 'الباقات',
   numbers: 'أرقام واتساب', groups: 'مجموعات واتساب', messagelists: 'قوائم الرسائل', operations: 'سجل العمليات', test: 'اختبار الاستخراج',
   welcome: 'رسالة الترحيب', suggestions: 'صندوق المقترحات', visachecks: 'فحوصات التأشيرات', activation: 'أوامر التفعيل',
-  knowledgebase: 'قاعدة المعرفة'
+  knowledgebase: 'قاعدة المعرفة', smartemployee: 'المعاملات والوكلاء'
 };
 
 function switchTab(tab) {
@@ -124,6 +124,7 @@ async function render() {
     else if (currentTab === 'visachecks') await renderVisaChecks(area);
     else if (currentTab === 'activation') await renderActivationCommands(area);
     else if (currentTab === 'knowledgebase') await renderKnowledgeBase(area);
+    else if (currentTab === 'smartemployee') await renderSmartEmployee(area);
     else if (currentTab === 'test') await renderTest(area);
   } catch (err) {
     if (guardAuth(err)) return;
@@ -1705,6 +1706,398 @@ window.analyzeKbNow = async function () {
   } catch (err) {
     if (guardAuth(err)) return;
     alert(err?.response?.data?.error || 'حدث خطأ أثناء التحليل');
+  }
+};
+
+// ---------------- Smart Employee (الموظف الذكي) ----------------
+// Per-office: master toggle + follow-up timers, agents, suppliers,
+// transactions list/detail, and WhatsApp-group role classification.
+let seCustomerId = null;
+let seGroupsCache = [];
+let seAgentsCache = [];
+let seSuppliersCache = [];
+let seSubTab = 'transactions';
+
+const TX_STATUS_LABELS = {
+  NEW: 'جديدة', RECEIVED_FROM_AGENT: 'استُلمت من الوكيل', WAITING_AGENT_CONFIRMATION: 'بانتظار تأكيد الوكيل',
+  SENT_TO_SUPPLIER: 'أُرسلت للمورد', WAITING_HOSTING: 'بانتظار الاستضافة', HOSTING_RECEIVED: 'استُلمت الاستضافة',
+  HOSTING_SENT_TO_AGENT: 'أُرسلت الاستضافة للوكيل', VISA_WAITING: 'بانتظار التأشيرة', VISA_RECEIVED: 'استُلمت التأشيرة',
+  VISA_SENT_TO_AGENT: 'أُرسلت التأشيرة للوكيل', COMPLETED: 'مكتملة', NEEDS_REVIEW: 'تحتاج مراجعة',
+  MISSING_DOCUMENT: 'مستند ناقص', WRONG_PERSON: 'شخص خاطئ', DUPLICATE_DOCUMENT: 'مستند مكرر',
+  FAILED_TRANSFER: 'فشل التحويل', CANCELLED: 'ملغاة'
+};
+function txStatusBadge(status) {
+  const doneSet = ['COMPLETED'];
+  const badSet = ['NEEDS_REVIEW', 'MISSING_DOCUMENT', 'WRONG_PERSON', 'DUPLICATE_DOCUMENT', 'FAILED_TRANSFER', 'CANCELLED'];
+  const cls = doneSet.includes(status) ? 'bg-emerald-50 text-emerald-700' : badSet.includes(status) ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-blue-700';
+  return `<span class="text-xs font-bold px-2.5 py-1 rounded-full ${cls}">${TX_STATUS_LABELS[status] || status}</span>`;
+}
+
+async function renderSmartEmployee(area) {
+  if (!customersCache.length) {
+    const { data } = await axios.get(`${API}/customers`);
+    customersCache = data.customers;
+  }
+  if (!seCustomerId && customersCache.length) seCustomerId = customersCache[0].id;
+
+  area.innerHTML = `
+    <div class="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-xl p-4 mb-5">
+      <i class="fa-solid fa-circle-info ml-1"></i>
+      الموظف الذكي يُدير معاملات العمرة بين الوكلاء (من يرسل الجوازات) والموردين (من يُنفّذ الاستضافة والتأشيرة) داخل مجموعات واتساب مصنَّفة. يجب تفعيل الميزة لكل مكتب، ثم تصنيف مجموعاته من تبويب "مجموعات واتساب".
+    </div>
+    <div class="flex items-center gap-3 mb-5">
+      <label class="text-sm font-bold text-gray-600">المكتب:</label>
+      <select id="se-customer-select" class="border border-gray-200 rounded-xl px-4 py-2.5 text-sm min-w-[220px]">
+        ${customersCache.map(c => `<option value="${c.id}" ${c.id === seCustomerId ? 'selected' : ''}>${c.name}</option>`).join('')}
+      </select>
+    </div>
+    <div id="se-body"></div>
+  `;
+  document.getElementById('se-customer-select').addEventListener('change', (e) => {
+    seCustomerId = Number(e.target.value);
+    renderSmartEmployeeBody();
+  });
+  await renderSmartEmployeeBody();
+}
+
+async function renderSmartEmployeeBody() {
+  const body = document.getElementById('se-body');
+  body.innerHTML = '<div class="text-center text-gray-400 py-10"><i class="fa-solid fa-spinner fa-spin"></i></div>';
+  if (!seCustomerId) { body.innerHTML = '<p class="text-gray-400 text-center py-10">أضف عميلاً أولاً</p>'; return; }
+
+  const customer = customersCache.find(c => c.id === seCustomerId) || {};
+  const enabled = !!customer.feature_smart_employee_enabled;
+
+  body.innerHTML = `
+    <div class="bg-white rounded-2xl border border-gray-100 p-5 mb-6">
+      <div class="flex items-center justify-between flex-wrap gap-4">
+        <div>
+          <h3 class="font-bold text-gray-900 mb-1">تفعيل الموظف الذكي لهذا المكتب</h3>
+          <p class="text-xs text-gray-500">عند التفعيل تُدار مجموعات الوكلاء والموردين المصنَّفة لهذا المكتب عبر آلة حالات المعاملات.</p>
+        </div>
+        <label class="inline-flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" id="se-enabled-toggle" ${enabled ? 'checked' : ''} class="w-5 h-5 accent-brand-600" />
+          <span class="text-sm font-bold ${enabled ? 'text-emerald-600' : 'text-gray-400'}">${enabled ? 'مفعّل' : 'غير مفعّل'}</span>
+        </label>
+      </div>
+      <div class="grid sm:grid-cols-3 gap-4 mt-5 pt-5 border-t border-gray-100">
+        <div>
+          <label class="block text-xs font-bold text-gray-500 mb-1">مهلة تذكير التأكيد (دقيقة)</label>
+          <input id="se-min-confirm" type="number" min="0" value="${customer.followup_confirmation_minutes ?? 30}" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-gray-500 mb-1">مهلة متابعة الاستضافة (دقيقة)</label>
+          <input id="se-min-hosting" type="number" min="0" value="${customer.followup_hosting_minutes ?? 60}" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-gray-500 mb-1">مهلة متابعة التأشيرة (دقيقة)</label>
+          <input id="se-min-visa" type="number" min="0" value="${customer.followup_visa_minutes ?? 120}" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm" />
+        </div>
+      </div>
+      <button onclick="saveSeSettings()" class="mt-4 bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold px-5 py-2.5 rounded-xl">حفظ الإعدادات</button>
+    </div>
+
+    <div class="flex gap-2 mb-5 border-b border-gray-100">
+      <button data-se-sub="transactions" class="se-sub-btn px-4 py-2.5 text-sm font-bold border-b-2 ${seSubTab === 'transactions' ? 'border-brand-600 text-brand-600' : 'border-transparent text-gray-400'}">المعاملات</button>
+      <button data-se-sub="agents" class="se-sub-btn px-4 py-2.5 text-sm font-bold border-b-2 ${seSubTab === 'agents' ? 'border-brand-600 text-brand-600' : 'border-transparent text-gray-400'}">الوكلاء</button>
+      <button data-se-sub="suppliers" class="se-sub-btn px-4 py-2.5 text-sm font-bold border-b-2 ${seSubTab === 'suppliers' ? 'border-brand-600 text-brand-600' : 'border-transparent text-gray-400'}">الموردون</button>
+      <button data-se-sub="groups" class="se-sub-btn px-4 py-2.5 text-sm font-bold border-b-2 ${seSubTab === 'groups' ? 'border-brand-600 text-brand-600' : 'border-transparent text-gray-400'}">تصنيف المجموعات</button>
+    </div>
+    <div id="se-sub-body"></div>
+  `;
+
+  document.querySelectorAll('.se-sub-btn').forEach(btn => {
+    btn.addEventListener('click', () => { seSubTab = btn.dataset.seSub; renderSmartEmployeeBody(); });
+  });
+
+  const subBody = document.getElementById('se-sub-body');
+  if (seSubTab === 'transactions') await renderSeTransactions(subBody);
+  else if (seSubTab === 'agents') await renderSeAgents(subBody);
+  else if (seSubTab === 'suppliers') await renderSeSuppliers(subBody);
+  else if (seSubTab === 'groups') await renderSeGroups(subBody);
+}
+
+window.saveSeSettings = async function () {
+  try {
+    await axios.put(`${API}/customers/${seCustomerId}/smart-employee`, {
+      enabled: document.getElementById('se-enabled-toggle').checked,
+      followup_confirmation_minutes: Number(document.getElementById('se-min-confirm').value) || 0,
+      followup_hosting_minutes: Number(document.getElementById('se-min-hosting').value) || 0,
+      followup_visa_minutes: Number(document.getElementById('se-min-visa').value) || 0
+    });
+    const { data } = await axios.get(`${API}/customers`);
+    customersCache = data.customers;
+    await renderSmartEmployeeBody();
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+// ---- Transactions sub-tab ----
+async function renderSeTransactions(body, statusFilter) {
+  body.innerHTML = '<div class="text-center text-gray-400 py-10"><i class="fa-solid fa-spinner fa-spin"></i></div>';
+  const { data } = await axios.get(`${API}/transactions`, { params: { customer_id: seCustomerId, status: statusFilter || undefined } });
+  const txs = data.transactions || [];
+
+  body.innerHTML = `
+    <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
+          <th class="p-4 font-medium">رقم المعاملة</th><th class="p-4 font-medium">الوكيل</th>
+          <th class="p-4 font-medium">المورد</th><th class="p-4 font-medium">الحالة</th>
+          <th class="p-4 font-medium">آخر تحديث</th><th class="p-4 font-medium"></th>
+        </tr></thead>
+        <tbody>
+          ${txs.map(t => `
+            <tr class="border-b border-gray-50">
+              <td class="p-4 font-mono font-bold">${t.transaction_code}</td>
+              <td class="p-4 text-gray-500">${t.agent_name || '-'}</td>
+              <td class="p-4 text-gray-500">${t.supplier_name || '-'}</td>
+              <td class="p-4">${txStatusBadge(t.status)}</td>
+              <td class="p-4 text-gray-400 text-xs">${fmtDate(t.updated_at)}</td>
+              <td class="p-4"><button onclick="viewTransaction(${t.id})" class="text-brand-600 hover:underline text-xs font-bold">تفاصيل</button></td>
+            </tr>`).join('') || '<tr><td colspan="6" class="p-8 text-center text-gray-400">لا توجد معاملات بعد</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+    <div id="se-tx-detail-modal"></div>
+  `;
+}
+
+window.viewTransaction = async function (id) {
+  const { data } = await axios.get(`${API}/transactions/${id}`);
+  const t = data.transaction;
+  const modal = document.getElementById('se-tx-detail-modal');
+  modal.innerHTML = `
+    <div class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onclick="if(event.target===this) this.remove()">
+      <div class="bg-white rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6" onclick="event.stopPropagation()">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-bold text-lg">معاملة ${t.transaction_code}</h3>
+          ${txStatusBadge(t.status)}
+        </div>
+        <div class="grid grid-cols-2 gap-3 text-sm mb-5">
+          <div><span class="text-gray-400">الوكيل:</span> ${t.agent_name || '-'}</div>
+          <div><span class="text-gray-400">المورد:</span> ${t.supplier_name || '-'}</div>
+          <div><span class="text-gray-400">رقم المضيف:</span> ${t.host_phone || '-'}</div>
+          <div><span class="text-gray-400">أُنشئت:</span> ${fmtDate(t.created_at)}</div>
+        </div>
+        <h4 class="font-bold text-sm mb-2">الأشخاص (${t.people.length})</h4>
+        <div class="space-y-2 mb-5">
+          ${t.people.map(p => `
+            <div class="bg-gray-50 rounded-xl p-3 text-sm flex items-center justify-between">
+              <span>${p.document_type === 'iqama' ? '🪪' : '🛂'} ${p.full_name_ar || '(بدون اسم)'} — ${p.document_number || '-'}</span>
+              <span class="text-xs text-gray-400">${p.status === 'needs_review' ? '⚠️ مراجعة' : ''}</span>
+            </div>`).join('') || '<p class="text-gray-400 text-xs">لا يوجد أشخاص مسجلون</p>'}
+        </div>
+        <h4 class="font-bold text-sm mb-2">سجل الحالات</h4>
+        <div class="space-y-1 mb-5 text-xs text-gray-500">
+          ${t.history.map(h => `<div>${fmtDate(h.created_at)} — ${h.from_status || 'بداية'} ← ${TX_STATUS_LABELS[h.to_status] || h.to_status} (${h.changed_by})${h.reason ? ' — ' + h.reason : ''}</div>`).join('')}
+        </div>
+        <div class="flex items-center gap-2 pt-4 border-t border-gray-100">
+          <select id="se-tx-status-select" class="border border-gray-200 rounded-lg px-3 py-2 text-sm flex-1">
+            ${Object.keys(TX_STATUS_LABELS).map(s => `<option value="${s}" ${s === t.status ? 'selected' : ''}>${TX_STATUS_LABELS[s]}</option>`).join('')}
+          </select>
+          <button onclick="forceTransactionStatus(${t.id})" class="bg-gray-800 hover:bg-gray-900 text-white text-sm font-bold px-4 py-2 rounded-lg">تغيير يدوي</button>
+        </div>
+      </div>
+    </div>
+  `;
+};
+
+window.forceTransactionStatus = async function (id) {
+  const status = document.getElementById('se-tx-status-select').value;
+  const reason = prompt('سبب التغيير اليدوي (اختياري):') || null;
+  try {
+    await axios.put(`${API}/transactions/${id}/status`, { status, reason });
+    document.getElementById('se-tx-detail-modal').innerHTML = '';
+    await renderSeTransactions(document.getElementById('se-sub-body'));
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+// ---- Agents sub-tab ----
+async function renderSeAgents(body) {
+  body.innerHTML = '<div class="text-center text-gray-400 py-10"><i class="fa-solid fa-spinner fa-spin"></i></div>';
+  const [{ data: agentsData }, { data: suppliersData }] = await Promise.all([
+    axios.get(`${API}/agents`, { params: { customer_id: seCustomerId } }),
+    axios.get(`${API}/suppliers`, { params: { customer_id: seCustomerId } })
+  ]);
+  seAgentsCache = agentsData.agents || [];
+  seSuppliersCache = suppliersData.suppliers || [];
+
+  body.innerHTML = `
+    <div class="bg-white rounded-2xl border border-gray-100 p-5 mb-5">
+      <h3 class="font-bold mb-4">إضافة وكيل جديد</h3>
+      <div class="grid sm:grid-cols-2 gap-3">
+        <input id="agent-name" placeholder="اسم الوكيل" class="border border-gray-200 rounded-lg px-3 py-2 text-sm" />
+        <input id="agent-phone" placeholder="رقم الهاتف (اختياري)" class="border border-gray-200 rounded-lg px-3 py-2 text-sm" />
+        <select id="agent-default-supplier" class="border border-gray-200 rounded-lg px-3 py-2 text-sm sm:col-span-2">
+          <option value="">بدون مورد افتراضي</option>
+          ${seSuppliersCache.map(s => `<option value="${s.id}">${s.name}</option>`).join('')}
+        </select>
+      </div>
+      <button onclick="createSeAgent()" class="mt-3 bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold px-5 py-2 rounded-xl">إضافة</button>
+    </div>
+    <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
+          <th class="p-4 font-medium">الاسم</th><th class="p-4 font-medium">الهاتف</th>
+          <th class="p-4 font-medium">المورد الافتراضي</th><th class="p-4 font-medium"></th>
+        </tr></thead>
+        <tbody>
+          ${seAgentsCache.map(a => `
+            <tr class="border-b border-gray-50">
+              <td class="p-4 font-semibold">${a.name}</td>
+              <td class="p-4 text-gray-500">${a.phone || '-'}</td>
+              <td class="p-4 text-gray-500">${a.default_supplier_name || '-'}</td>
+              <td class="p-4"><button onclick="deleteSeAgent(${a.id})" class="text-red-500 hover:underline text-xs font-bold">حذف</button></td>
+            </tr>`).join('') || '<tr><td colspan="4" class="p-8 text-center text-gray-400">لا يوجد وكلاء بعد</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+window.createSeAgent = async function () {
+  const name = document.getElementById('agent-name').value.trim();
+  if (!name) return alert('اسم الوكيل مطلوب');
+  try {
+    await axios.post(`${API}/agents`, {
+      customer_id: seCustomerId, name,
+      phone: document.getElementById('agent-phone').value.trim() || null,
+      default_supplier_id: Number(document.getElementById('agent-default-supplier').value) || null
+    });
+    await renderSeAgents(document.getElementById('se-sub-body'));
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+window.deleteSeAgent = async function (id) {
+  if (!confirm('حذف هذا الوكيل؟')) return;
+  await axios.delete(`${API}/agents/${id}`);
+  await renderSeAgents(document.getElementById('se-sub-body'));
+};
+
+// ---- Suppliers sub-tab ----
+async function renderSeSuppliers(body) {
+  body.innerHTML = '<div class="text-center text-gray-400 py-10"><i class="fa-solid fa-spinner fa-spin"></i></div>';
+  const { data } = await axios.get(`${API}/suppliers`, { params: { customer_id: seCustomerId } });
+  seSuppliersCache = data.suppliers || [];
+
+  body.innerHTML = `
+    <div class="bg-white rounded-2xl border border-gray-100 p-5 mb-5">
+      <h3 class="font-bold mb-4">إضافة مورد جديد</h3>
+      <div class="grid sm:grid-cols-2 gap-3">
+        <input id="supplier-name" placeholder="اسم المورد" class="border border-gray-200 rounded-lg px-3 py-2 text-sm" />
+        <input id="supplier-phone" placeholder="رقم الهاتف (اختياري)" class="border border-gray-200 rounded-lg px-3 py-2 text-sm" />
+      </div>
+      <button onclick="createSeSupplier()" class="mt-3 bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold px-5 py-2 rounded-xl">إضافة</button>
+    </div>
+    <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
+          <th class="p-4 font-medium">الاسم</th><th class="p-4 font-medium">الهاتف</th><th class="p-4 font-medium"></th>
+        </tr></thead>
+        <tbody>
+          ${seSuppliersCache.map(s => `
+            <tr class="border-b border-gray-50">
+              <td class="p-4 font-semibold">${s.name}</td>
+              <td class="p-4 text-gray-500">${s.phone || '-'}</td>
+              <td class="p-4"><button onclick="deleteSeSupplier(${s.id})" class="text-red-500 hover:underline text-xs font-bold">حذف</button></td>
+            </tr>`).join('') || '<tr><td colspan="3" class="p-8 text-center text-gray-400">لا يوجد موردون بعد</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+window.createSeSupplier = async function () {
+  const name = document.getElementById('supplier-name').value.trim();
+  if (!name) return alert('اسم المورد مطلوب');
+  try {
+    await axios.post(`${API}/suppliers`, {
+      customer_id: seCustomerId, name,
+      phone: document.getElementById('supplier-phone').value.trim() || null
+    });
+    await renderSeSuppliers(document.getElementById('se-sub-body'));
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+window.deleteSeSupplier = async function (id) {
+  if (!confirm('حذف هذا المورد؟')) return;
+  await axios.delete(`${API}/suppliers/${id}`);
+  await renderSeSuppliers(document.getElementById('se-sub-body'));
+};
+
+// ---- Groups classification sub-tab ----
+// Reuses the existing /whatsapp-groups list but filtered to this office,
+// letting the admin tag each linked group as agent/supplier/bot and (for
+// agent groups) pin it to a specific agent record.
+async function renderSeGroups(body) {
+  body.innerHTML = '<div class="text-center text-gray-400 py-10"><i class="fa-solid fa-spinner fa-spin"></i></div>';
+  const [{ data: groupsData }, { data: agentsData }, { data: suppliersData }] = await Promise.all([
+    axios.get(`${API}/whatsapp-groups`),
+    axios.get(`${API}/agents`, { params: { customer_id: seCustomerId } }),
+    axios.get(`${API}/suppliers`, { params: { customer_id: seCustomerId } })
+  ]);
+  seGroupsCache = (groupsData.groups || []).filter(g => g.customer_id === seCustomerId);
+  seAgentsCache = agentsData.agents || [];
+  seSuppliersCache = suppliersData.suppliers || [];
+
+  body.innerHTML = `
+    <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
+          <th class="p-4 font-medium">اسم المجموعة</th><th class="p-4 font-medium">النوع</th>
+          <th class="p-4 font-medium">ربط بـ</th><th class="p-4 font-medium"></th>
+        </tr></thead>
+        <tbody>
+          ${seGroupsCache.map(g => `
+            <tr class="border-b border-gray-50" data-group-id="${g.id}">
+              <td class="p-4 font-semibold">${g.group_name || '-'}</td>
+              <td class="p-4">
+                <select class="group-type-select border border-gray-200 rounded-lg px-2 py-1.5 text-xs">
+                  <option value="bot" ${g.group_type === 'bot' ? 'selected' : ''}>بوت عام</option>
+                  <option value="agent" ${g.group_type === 'agent' ? 'selected' : ''}>وكيل</option>
+                  <option value="supplier" ${g.group_type === 'supplier' ? 'selected' : ''}>مورد</option>
+                </select>
+              </td>
+              <td class="p-4">
+                <select class="group-link-select border border-gray-200 rounded-lg px-2 py-1.5 text-xs">
+                  <option value="">-</option>
+                  ${seAgentsCache.map(a => `<option value="agent:${a.id}" ${g.agent_id === a.id ? 'selected' : ''}>وكيل: ${a.name}</option>`).join('')}
+                  ${seSuppliersCache.map(s => `<option value="supplier:${s.id}" ${g.supplier_id === s.id ? 'selected' : ''}>مورد: ${s.name}</option>`).join('')}
+                </select>
+              </td>
+              <td class="p-4"><button onclick="saveGroupRole(${g.id}, this)" class="text-brand-600 hover:underline text-xs font-bold">حفظ</button></td>
+            </tr>`).join('') || '<tr><td colspan="4" class="p-8 text-center text-gray-400">لا توجد مجموعات مرتبطة بهذا المكتب بعد</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+window.saveGroupRole = async function (groupId, btnEl) {
+  const row = btnEl.closest('tr');
+  const group_type = row.querySelector('.group-type-select').value;
+  const linkVal = row.querySelector('.group-link-select').value;
+  let agent_id = null, supplier_id = null;
+  if (linkVal.startsWith('agent:')) agent_id = Number(linkVal.split(':')[1]);
+  else if (linkVal.startsWith('supplier:')) supplier_id = Number(linkVal.split(':')[1]);
+  try {
+    await axios.put(`${API}/whatsapp-groups/${groupId}/role`, { group_type, agent_id, supplier_id });
+    alert('تم الحفظ');
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ');
   }
 };
 

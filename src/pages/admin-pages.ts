@@ -107,6 +107,8 @@ export function adminDashboardPage(): string {
         <button data-tab="groups" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-people-group w-5"></i> مجموعات واتساب</button>
         <button data-tab="messagelists" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-bullhorn w-5"></i> قوائم الرسائل</button>
         <button data-tab="operations" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-list-check w-5"></i> سجل العمليات</button>
+        <div class="pt-3 pb-1 px-4 text-xs text-gray-500 font-bold">الموظف الذكي</div>
+        <button data-tab="smartemployee" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-robot w-5"></i> المعاملات والوكلاء</button>
         <div class="pt-3 pb-1 px-4 text-xs text-gray-500 font-bold">ضبط الميزات</div>
         <button data-tab="welcome" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-comment-dots w-5"></i> رسالة الترحيب</button>
         <button data-tab="suggestions" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-lightbulb w-5"></i> صندوق المقترحات</button>

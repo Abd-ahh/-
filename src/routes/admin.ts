@@ -11,6 +11,11 @@ import {
   updateMessageList, deleteMessageList
 } from '../lib/messageLists'
 import { listStaffNumbers, addStaffNumber, removeStaffNumber, runKnowledgeBaseAnalysis } from '../lib/knowledgeBase'
+import {
+  listAgents, createAgent, updateAgent, deleteAgent,
+  listSuppliers, createSupplier, updateSupplier, deleteSupplier,
+  listTransactions, getTransactionDetail, adminTransitionTransaction
+} from '../lib/smartEmployeeAdmin'
 import type { AppEnv } from '../lib/types'
 
 const admin = new Hono<AppEnv>()
@@ -921,6 +926,158 @@ admin.post('/knowledge-base/analyze-now', async (c) => {
   const result = await runKnowledgeBaseAnalysis(DB, GEMINI_API_KEY, customer_id)
   if ('error' in result) return c.json(result, 400)
   return c.json({ success: true, ...result })
+})
+
+// =====================================================================
+// "الموظف الذكي" (Smart Employee) — admin dashboard API.
+// Master enable/disable + per-office follow-up timers, agents, suppliers,
+// transactions (read + manual override), and WhatsApp-group role
+// classification (bot | agent | supplier). customer_id is always passed
+// explicitly (query for reads, body for writes) — same convention already
+// used by the Message Lists / Knowledge Base admin endpoints above, since
+// the admin isn't tied to a single customer_id like the customer portal is.
+// =====================================================================
+
+// ---------------------- Master toggle + follow-up timers ----------------------
+admin.put('/customers/:id/smart-employee', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const existing = await DB.prepare('SELECT id FROM customers WHERE id = ?').bind(id).first()
+  if (!existing) return c.json({ error: 'العميل غير موجود' }, 404)
+
+  const body = await c.req.json<{
+    enabled?: boolean
+    followup_confirmation_minutes?: number
+    followup_hosting_minutes?: number
+    followup_visa_minutes?: number
+  }>()
+
+  const sets: string[] = []
+  const binds: any[] = []
+  if (body.enabled !== undefined) { sets.push('feature_smart_employee_enabled = ?'); binds.push(body.enabled ? 1 : 0) }
+  if (body.followup_confirmation_minutes !== undefined) { sets.push('followup_confirmation_minutes = ?'); binds.push(body.followup_confirmation_minutes) }
+  if (body.followup_hosting_minutes !== undefined) { sets.push('followup_hosting_minutes = ?'); binds.push(body.followup_hosting_minutes) }
+  if (body.followup_visa_minutes !== undefined) { sets.push('followup_visa_minutes = ?'); binds.push(body.followup_visa_minutes) }
+  if (sets.length === 0) return c.json({ error: 'لا توجد بيانات للتحديث' }, 400)
+
+  binds.push(id)
+  await DB.prepare(`UPDATE customers SET ${sets.join(', ')} WHERE id = ?`).bind(...binds).run()
+  return c.json({ success: true })
+})
+
+// ---------------------- Agents (الوكلاء) ----------------------
+admin.get('/agents', async (c) => {
+  const { DB } = c.env
+  const customerId = parseInt(c.req.query('customer_id') || '0', 10)
+  if (!customerId) return c.json({ error: 'customer_id مطلوب' }, 400)
+  return c.json({ agents: await listAgents(DB, customerId) })
+})
+
+admin.post('/agents', async (c) => {
+  const { DB } = c.env
+  const body = await c.req.json<any>()
+  if (!body.customer_id) return c.json({ error: 'customer_id مطلوب' }, 400)
+  try {
+    const id = await createAgent(DB, body.customer_id, body)
+    return c.json({ success: true, id })
+  } catch (err: any) {
+    return c.json({ error: err?.message || 'فشل إنشاء الوكيل' }, 400)
+  }
+})
+
+admin.put('/agents/:id', async (c) => {
+  const { DB } = c.env
+  try {
+    await updateAgent(DB, parseInt(c.req.param('id'), 10), await c.req.json())
+    return c.json({ success: true })
+  } catch (err: any) {
+    return c.json({ error: err?.message || 'فشل تحديث الوكيل' }, 400)
+  }
+})
+
+admin.delete('/agents/:id', async (c) => {
+  const { DB } = c.env
+  await deleteAgent(DB, parseInt(c.req.param('id'), 10))
+  return c.json({ success: true })
+})
+
+// ---------------------- Suppliers (الموردون) ----------------------
+admin.get('/suppliers', async (c) => {
+  const { DB } = c.env
+  const customerId = parseInt(c.req.query('customer_id') || '0', 10)
+  if (!customerId) return c.json({ error: 'customer_id مطلوب' }, 400)
+  return c.json({ suppliers: await listSuppliers(DB, customerId) })
+})
+
+admin.post('/suppliers', async (c) => {
+  const { DB } = c.env
+  const body = await c.req.json<any>()
+  if (!body.customer_id) return c.json({ error: 'customer_id مطلوب' }, 400)
+  try {
+    const id = await createSupplier(DB, body.customer_id, body)
+    return c.json({ success: true, id })
+  } catch (err: any) {
+    return c.json({ error: err?.message || 'فشل إنشاء المورد' }, 400)
+  }
+})
+
+admin.put('/suppliers/:id', async (c) => {
+  const { DB } = c.env
+  try {
+    await updateSupplier(DB, parseInt(c.req.param('id'), 10), await c.req.json())
+    return c.json({ success: true })
+  } catch (err: any) {
+    return c.json({ error: err?.message || 'فشل تحديث المورد' }, 400)
+  }
+})
+
+admin.delete('/suppliers/:id', async (c) => {
+  const { DB } = c.env
+  await deleteSupplier(DB, parseInt(c.req.param('id'), 10))
+  return c.json({ success: true })
+})
+
+// ---------------------- Transactions (المعاملات) ----------------------
+admin.get('/transactions', async (c) => {
+  const { DB } = c.env
+  const customerId = parseInt(c.req.query('customer_id') || '0', 10)
+  if (!customerId) return c.json({ error: 'customer_id مطلوب' }, 400)
+  const status = c.req.query('status') || null
+  return c.json({ transactions: await listTransactions(DB, customerId, status) })
+})
+
+admin.get('/transactions/:id', async (c) => {
+  const { DB } = c.env
+  const detail = await getTransactionDetail(DB, parseInt(c.req.param('id'), 10))
+  if (!detail) return c.json({ error: 'المعاملة غير موجودة' }, 404)
+  return c.json({ transaction: detail })
+})
+
+admin.put('/transactions/:id/status', async (c) => {
+  const { DB } = c.env
+  const admin_ = c.get('admin')
+  const { status, reason } = await c.req.json<{ status?: string; reason?: string }>()
+  if (!status) return c.json({ error: 'status مطلوب' }, 400)
+  const result = await adminTransitionTransaction(DB, parseInt(c.req.param('id'), 10), status, reason || null, admin_?.email || 'unknown')
+  if (!result.ok) return c.json({ error: 'المعاملة غير موجودة' }, 404)
+  return c.json({ success: true, transaction: result.transaction })
+})
+
+// ---------------------- WhatsApp group role classification ----------------------
+// Extends the existing /whatsapp-groups admin view (above) with the Smart
+// Employee role fields. Separate endpoint to avoid touching the generic
+// group-deletion route's behavior.
+admin.put('/whatsapp-groups/:id/role', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const { group_type, agent_id, supplier_id } = await c.req.json<{ group_type?: string; agent_id?: number | null; supplier_id?: number | null }>()
+  if (!group_type || !['bot', 'agent', 'supplier'].includes(group_type)) {
+    return c.json({ error: 'group_type غير صالح' }, 400)
+  }
+  await DB.prepare(
+    `UPDATE whatsapp_groups SET group_type = ?, agent_id = ?, supplier_id = ?, updated_at = datetime('now') WHERE id = ?`
+  ).bind(group_type, agent_id || null, supplier_id || null, id).run()
+  return c.json({ success: true })
 })
 
 export default admin

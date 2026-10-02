@@ -13,6 +13,8 @@ import { runExtractionBatch } from '../lib/extractionBatch'
 import { buildResultMessage } from '../lib/passportMessage'
 import { runDueMessageLists, applyMessageListAck } from '../lib/messageLists'
 import { logConversationMessage, runDueKnowledgeBaseAnalysis, runKnowledgeBaseAnalysis, purgeOldConversationMessages } from '../lib/knowledgeBase'
+import { handleAgentGroupImage, handleAgentGroupText, handleSupplierGroupImage, handleSupplierGroupText } from '../lib/smartEmployee'
+import { runDueFollowUpTasks } from '../lib/followUp'
 
 const SHARED_SESSION_DAYS = 30
 
@@ -632,6 +634,36 @@ webhook.post('/bridge/message', async (c) => {
       return c.json({})
     }
 
+    // ---------------- Smart Employee (الموظف الذكي) routing ----------------
+    // Only kicks in for groups the admin explicitly classified as 'agent'
+    // or 'supplier' (migration 0013) AND whose office has opted into the
+    // feature — every pre-existing 'bot' group (the only type that ever
+    // existed before this) falls straight through to the unchanged logic
+    // below, byte-for-byte identical to its pre-migration behavior.
+    if (existingGroup.group_type === 'agent' || existingGroup.group_type === 'supplier') {
+      const seCustomer = await DB.prepare('SELECT * FROM customers WHERE id = ?').bind(existingGroup.customer_id).first<any>()
+      if (seCustomer?.feature_smart_employee_enabled) {
+        let seReply: string | null = null
+        if (existingGroup.group_type === 'agent') {
+          let supplierConvKey: string | null = null
+          if (existingGroup.agent_id) {
+            const agentRow = await DB.prepare('SELECT default_supplier_id FROM agents WHERE id = ?').bind(existingGroup.agent_id).first<{ default_supplier_id: number | null }>()
+            if (agentRow?.default_supplier_id) {
+              const supplierRow = await DB.prepare('SELECT conversation_key FROM suppliers WHERE id = ?').bind(agentRow.default_supplier_id).first<{ conversation_key: string | null }>()
+              supplierConvKey = supplierRow?.conversation_key || null
+            }
+          }
+          seReply = await handleAgentGroupText(
+            { DB, GEMINI_API_KEY }, existingGroup.customer_id, group_jid, existingGroup.agent_id, supplierConvKey, messageText
+          ).catch((err) => { console.error('handleAgentGroupText failed', err); return null })
+        } else {
+          seReply = await handleSupplierGroupText({ DB, GEMINI_API_KEY }, existingGroup.customer_id, messageText)
+            .catch((err) => { console.error('handleSupplierGroupText failed', err); return null })
+        }
+        return seReply ? c.json({ reply: seReply }) : c.json({})
+      }
+    }
+
     // Knowledge Base (feature requested 2026-08-24): log every text message
     // exchanged inside an already-linked group — this is exactly where real
     // staff<->client Q&A happens (general chat, not just bot commands), so
@@ -712,6 +744,32 @@ webhook.post('/bridge/message', async (c) => {
   const customerId = existingGroup.customer_id as number
   const customer = await DB.prepare('SELECT * FROM customers WHERE id = ?').bind(customerId).first<any>()
   const lang = customer?.reply_language || 'ar'
+
+  // ---------------- Smart Employee (الموظف الذكي) routing (images) ----------------
+  if ((existingGroup.group_type === 'agent' || existingGroup.group_type === 'supplier') && customer?.feature_smart_employee_enabled) {
+    if (!image_base64) return c.json({})
+    let seReply: string | null = null
+    if (existingGroup.group_type === 'agent') {
+      let supplierConvKey: string | null = null
+      if (existingGroup.agent_id) {
+        const agentRow = await DB.prepare('SELECT default_supplier_id FROM agents WHERE id = ?').bind(existingGroup.agent_id).first<{ default_supplier_id: number | null }>()
+        if (agentRow?.default_supplier_id) {
+          const supplierRow = await DB.prepare('SELECT conversation_key FROM suppliers WHERE id = ?').bind(agentRow.default_supplier_id).first<{ conversation_key: string | null }>()
+          supplierConvKey = supplierRow?.conversation_key || null
+        }
+      }
+      seReply = await handleAgentGroupImage(
+        { DB, PASSPORTS_BUCKET: c.env.PASSPORTS_BUCKET, GEMINI_API_KEY }, customerId, customer, group_jid, sender_jid,
+        existingGroup.agent_id, supplierConvKey, image_base64, mime_type || 'image/jpeg'
+      ).catch((err) => { console.error('handleAgentGroupImage failed', err); return null })
+    } else {
+      seReply = await handleSupplierGroupImage(
+        { DB, PASSPORTS_BUCKET: c.env.PASSPORTS_BUCKET, GEMINI_API_KEY }, customerId, existingGroup.supplier_id,
+        image_base64, mime_type || 'image/jpeg', text || ''
+      ).catch((err) => { console.error('handleSupplierGroupImage failed', err); return null })
+    }
+    return seReply ? c.json({ reply: seReply }) : c.json({})
+  }
 
   const T = lang === 'en'
     ? {
@@ -1193,6 +1251,21 @@ webhook.get('/knowledge-base/tick', async (c) => {
     return 0
   })
   return c.json({ ok: true, analyzed, purged_messages: purged })
+})
+
+// =====================================================================
+// Smart Employee (الموظف الذكي) — follow-up tick, same polling pattern as
+// visa-checks/message-lists/knowledge-base above. The VPS bridge process
+// calls this once a minute; any transaction follow-up whose due_at has
+// passed gets delivered to its target conversation (agent or supplier).
+// =====================================================================
+webhook.get('/follow-up/tick', async (c) => {
+  const { DB, BRIDGE_SECRET } = c.env
+  if (!BRIDGE_SECRET || c.req.header('x-bridge-secret') !== BRIDGE_SECRET) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const result = await runDueFollowUpTasks(DB)
+  return c.json({ ok: true, ...result })
 })
 
 export default webhook

@@ -1,4 +1,4 @@
-import type { PassportExtractionResult } from './types'
+import type { PassportExtractionResult, IqamaExtractionResult } from './types'
 
 const EXTRACTION_PROMPT = `أنت محرك تحليل وثائق رسمية متخصص في قراءة جوازات السفر (من جميع الدول العربية والأجنبية).
 
@@ -121,4 +121,114 @@ export async function extractPassportData(
 
   // Should be unreachable, but keep TypeScript happy.
   throw lastError || new Error('فشل استخراج بيانات الجواز لسبب غير معروف')
+}
+
+// =========================================================================
+// Smart Employee (الموظف الذكي, migration 0013) — Iqama/residency document
+// extraction. Shares the same model/retry/JSON-parsing strategy as
+// extractPassportData above (proven reliable in production); only the
+// prompt and response shape differ, since an iqama has different fields
+// (profession/sponsor, no MRZ) and no expectation of Arabic+English dual
+// printing the way most passports have.
+// =========================================================================
+const IQAMA_EXTRACTION_PROMPT = `أنت محرك تحليل وثائق رسمية متخصص في قراءة بطاقات الإقامة (الهوية) السعودية والخليجية.
+
+مهمتك: تحليل الصورة المرفقة والتحقق أولاً هل هي فعلاً بطاقة إقامة/هوية، وهل الصورة واضحة بما يكفي لقراءة موثوقة.
+
+القواعد الصارمة:
+1. إذا لم تكن الصورة بطاقة إقامة/هوية إطلاقاً (مثلاً جواز سفر، صورة عشوائية، مستند آخر) اجعل is_iqama = false.
+2. إذا كانت الصورة بطاقة إقامة لكنها غير واضحة (ضبابية، مقطوعة، بها انعكاس ضوء يحجب النص، مائلة جداً، دقة منخفضة) بحيث لا يمكنك قراءة الاسم أو رقم الإقامة بثقة، اجعل is_clear = false واشرح السبب في clarity_reason بالعربي.
+3. لا تخمّن أبداً. إذا لم تكن متأكداً من حرف أو رقم، اترك الحقل فارغاً بدلاً من التخمين.
+4. استخرج الاسم الكامل بالعربية كما هو مطبوع على البطاقة.
+5. أعد التاريخ بصيغة YYYY-MM-DD دائماً إن أمكن (البطاقة قد تستخدم التقويم الهجري، في هذه الحالة اكتب القيمة كما هي مطبوعة إن تعذرت القراءة الميلادية).
+6. قيمة confidence رقم بين 0 و 1 يعكس مدى ثقتك الإجمالية في دقة البيانات المستخرجة.
+
+أعد الإجابة بصيغة JSON فقط بدون أي نص إضافي، وفق هذا الشكل بالضبط:
+{
+  "is_iqama": boolean,
+  "is_clear": boolean,
+  "clarity_reason": "سبب عدم الوضوح إن وجد، أو نص فارغ",
+  "full_name_ar": "الاسم الكامل بالعربية",
+  "full_name_en": "الاسم الكامل بالإنجليزية إن وجد",
+  "id_number": "رقم الإقامة/الهوية",
+  "nationality": "الجنسية",
+  "date_of_birth": "YYYY-MM-DD",
+  "date_of_expiry": "YYYY-MM-DD",
+  "profession": "المهنة إن وجدت",
+  "sponsor": "الكفيل/جهة العمل إن وجدت",
+  "gender": "ذكر أو أنثى",
+  "confidence": 0.0
+}`
+
+export async function extractIqamaData(
+  apiKey: string,
+  imageBase64: string,
+  mimeType: string
+): Promise<IqamaExtractionResult> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`
+
+  const body = {
+    contents: [
+      {
+        parts: [
+          { text: IQAMA_EXTRACTION_PROMPT },
+          { inline_data: { mime_type: mimeType, data: imageBase64 } }
+        ]
+      }
+    ],
+    generationConfig: {
+      temperature: 0.1,
+      response_mime_type: 'application/json'
+    }
+  }
+
+  let lastError: Error | null = null
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    let resp: Response
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+    } catch (err: any) {
+      lastError = new Error(`Gemini network error: ${err?.message || err}`)
+      if (attempt < MAX_RETRIES) {
+        await sleep(RETRY_DELAY_MS)
+        continue
+      }
+      throw lastError
+    }
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '')
+      const isTransient = resp.status === 503 || resp.status === 429
+      lastError = new Error(`Gemini API error (${resp.status}): ${errText}`)
+      if (isTransient && attempt < MAX_RETRIES) {
+        await sleep(RETRY_DELAY_MS * (attempt + 1))
+        continue
+      }
+      throw lastError
+    }
+
+    const data = await resp.json<any>()
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text
+    if (!text) {
+      throw new Error('لم يتم استلام رد صالح من Gemini')
+    }
+
+    let parsed: IqamaExtractionResult
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      const match = text.match(/\{[\s\S]*\}/)
+      if (!match) throw new Error('تعذر تحليل رد Gemini كـ JSON')
+      parsed = JSON.parse(match[0])
+    }
+
+    return parsed
+  }
+
+  throw lastError || new Error('فشل استخراج بيانات الإقامة لسبب غير معروف')
 }

@@ -17,6 +17,86 @@ export type ParsedCommand =
   | { type: 'help' }
   | null
 
+// ---------------------- Smart Employee (الموظف الذكي) ----------------------
+// Natural-language intent detection for closing/confirming a pending Umrah
+// transaction (spec document section 5). Kept deliberately separate from
+// parseCommand() above since these phrases are only meaningful inside an
+// "agent"-type conversation with an open transaction — callers in
+// webhook.ts check that context before calling this.
+export type TransactionIntent = 'confirm' | 'reject' | null
+
+// Explicit "close the transaction now" phrases — any of these immediately
+// confirms+forwards the transaction to the supplier, without waiting for
+// the "هل نرفع المعاملة؟" prompt.
+const TRANSACTION_CLOSE_PHRASES = ['ارفع', 'ارفعها', 'رحل', 'رحلها', 'حول', 'حولها', 'ارسلها', 'جهزها', 'خلاص ارفعها', 'خلص ارفعها']
+// Plain yes/no, only meaningful as a REPLY to the bot's own "هل نرفع
+// المعاملة؟" confirmation prompt for a transaction already in
+// WAITING_AGENT_CONFIRMATION — see detectTransactionIntent's `onlyAsReply` param.
+const CONFIRM_REPLY_PHRASES = ['نعم', 'ايوه', 'ايوة', 'اه', 'تمام', 'صح']
+const REJECT_REPLY_PHRASES = ['لا', 'لأ', 'لا تنشرها', 'توقف', 'الغاء']
+
+// `awaitingConfirmation` = true when the transaction is currently in
+// WAITING_AGENT_CONFIRMATION (the bot already asked "هل نرفع المعاملة؟").
+// In that state a bare "نعم"/"لا" is unambiguous. Outside that state, only
+// the explicit close phrases ("ارفع"، "رحّل"...) count — a stray "نعم" in
+// normal chat must NOT be misread as a transaction confirmation.
+export function detectTransactionIntent(rawText: string, awaitingConfirmation: boolean): TransactionIntent {
+  const text = (rawText || '').trim()
+  if (!text) return null
+  const normalized = normalizeArabicText(text)
+
+  if (TRANSACTION_CLOSE_PHRASES.some((p) => normalizeArabicText(p) === normalized)) return 'confirm'
+
+  if (awaitingConfirmation) {
+    if (CONFIRM_REPLY_PHRASES.some((p) => normalizeArabicText(p) === normalized)) return 'confirm'
+    if (REJECT_REPLY_PHRASES.some((p) => normalizeArabicText(p) === normalized)) return 'reject'
+  }
+
+  return null
+}
+
+// Extracts a plausible host phone number from free text (spec: "رقم
+// المضيف" sent as a normal text message alongside the passport/iqama
+// photos). Accepts digits with optional +/spaces/dashes, 8-15 digits long
+// after stripping — broad enough for Saudi/Yemeni/Gulf numbers without
+// hardcoding one specific country format.
+export function extractHostPhone(rawText: string): string | null {
+  if (!rawText) return null
+  const match = rawText.match(/(\+?\d[\d\s\-]{7,17}\d)/)
+  if (!match) return null
+  const digits = match[1].replace(/\D/g, '')
+  if (digits.length < 8 || digits.length > 15) return null
+  return digits
+}
+
+// Transaction code pattern used by suppliers to reference which
+// transaction their reply (hosting ready / visa ready) is about, e.g.
+// "استضافة جاهزة UMR-260001". Matches the format generated in
+// transactions.ts (generateTransactionCode).
+const TRANSACTION_CODE_RE = /UMR-\d{6,}/i
+
+export function extractTransactionCode(rawText: string): string | null {
+  if (!rawText) return null
+  const match = rawText.match(TRANSACTION_CODE_RE)
+  return match ? match[0].toUpperCase() : null
+}
+
+export type SupplierReplyIntent = 'hosting_ready' | 'visa_ready' | null
+
+const HOSTING_READY_PHRASES = ['استضافة جاهزة', 'الاستضافة جاهزة', 'تم الاستضافة', 'تمت الاستضافة']
+const VISA_READY_PHRASES = ['التاشيره جاهزه', 'التأشيرة جاهزة', 'الفيزا جاهزة', 'تم اصدار التاشيره', 'تمت التاشيره']
+
+// Detects a supplier's status-update intent from free text (used alongside
+// extractTransactionCode so the reply can be matched to the right
+// transaction even when the supplier group handles many at once).
+export function detectSupplierReplyIntent(rawText: string): SupplierReplyIntent {
+  if (!rawText) return null
+  const normalized = normalizeArabicText(rawText)
+  if (HOSTING_READY_PHRASES.some((p) => normalized.includes(normalizeArabicText(p)))) return 'hosting_ready'
+  if (VISA_READY_PHRASES.some((p) => normalized.includes(normalizeArabicText(p)))) return 'visa_ready'
+  return null
+}
+
 const CHECK_NOW_PHRASES = ['فحص التاشيره', 'فحص التأشيرة', 'فحص الفيزا', 'تحقق من التاشيره', 'تحقق التاشيره']
 const LIST_PHRASES = ['القائمه', 'القائمة', 'قائمه الاسماء', 'قائمة الأسماء']
 // "استخراج" processes every queued/pending image for this conversation in
