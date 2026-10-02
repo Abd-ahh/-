@@ -174,8 +174,14 @@ export async function transitionTransaction(
 export async function isTransactionReadyForConfirmation(DB: D1Database, transactionId: number): Promise<boolean> {
   const tx = await DB.prepare('SELECT host_phone FROM transactions WHERE id = ?').bind(transactionId).first<{ host_phone: string | null }>()
   if (!tx?.host_phone) return false
+  // BUGFIX (2026-10-02, real-world field test): originally only counted
+  // document_type='passport', which meant a transaction whose agent sent
+  // an IQAMA (residency card) instead of a passport — the common case per
+  // the actual screenshots supplied by the user — could NEVER become ready
+  // for confirmation. Both document types are valid identity documents for
+  // this transaction type.
   const people = await DB.prepare(
-    `SELECT COUNT(*) as cnt FROM transaction_people WHERE transaction_id = ? AND document_type = 'passport'`
+    `SELECT COUNT(*) as cnt FROM transaction_people WHERE transaction_id = ? AND document_type IN ('passport', 'iqama')`
   ).bind(transactionId).first<{ cnt: number }>()
   return (people?.cnt || 0) > 0
 }

@@ -1794,6 +1794,18 @@ async function renderSmartEmployeeBody() {
           <input id="se-min-visa" type="number" min="0" value="${customer.followup_visa_minutes ?? 120}" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm" />
         </div>
       </div>
+
+      <div class="mt-5 pt-5 border-t border-gray-100">
+        <h4 class="font-bold text-gray-900 text-sm mb-1">إشارات إغلاق/رفع المعاملة</h4>
+        <p class="text-xs text-gray-500 mb-3">بعض المكاتب تغلق المعاملة بكلمات مختلفة عن الكلمات الافتراضية ("ارفع"، "ارفعوا"، "رحّل"...)، أو ترسل ملصق (sticker) بدلاً من كتابة نص. حدد هنا ما يناسب مكتبك.</p>
+        <label class="block text-xs font-bold text-gray-500 mb-1">كلمات/عبارات إغلاق إضافية (اختياري، مفصولة بفاصلة أو سطر جديد)</label>
+        <textarea id="se-close-phrases" rows="2" placeholder="مثال: خلصوها, تم الرفع, رفعنا المعاملة" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm mb-3">${customer.se_close_phrases || ''}</textarea>
+        <label class="inline-flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" id="se-accept-sticker" ${customer.se_accept_sticker_as_close ? 'checked' : ''} class="w-5 h-5 accent-brand-600" />
+          <span class="text-sm font-bold text-gray-700">اعتبار أي ملصق (sticker) يُرسل في مجموعة الوكيل إشارة لرفع المعاملة</span>
+        </label>
+      </div>
+
       <button onclick="saveSeSettings()" class="mt-4 bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold px-5 py-2.5 rounded-xl">حفظ الإعدادات</button>
     </div>
 
@@ -1823,7 +1835,9 @@ window.saveSeSettings = async function () {
       enabled: document.getElementById('se-enabled-toggle').checked,
       followup_confirmation_minutes: Number(document.getElementById('se-min-confirm').value) || 0,
       followup_hosting_minutes: Number(document.getElementById('se-min-hosting').value) || 0,
-      followup_visa_minutes: Number(document.getElementById('se-min-visa').value) || 0
+      followup_visa_minutes: Number(document.getElementById('se-min-visa').value) || 0,
+      se_close_phrases: document.getElementById('se-close-phrases').value || null,
+      se_accept_sticker_as_close: document.getElementById('se-accept-sticker').checked
     });
     const { data } = await axios.get(`${API}/customers`);
     customersCache = data.customers;

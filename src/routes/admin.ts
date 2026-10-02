@@ -950,6 +950,13 @@ admin.put('/customers/:id/smart-employee', async (c) => {
     followup_confirmation_minutes?: number
     followup_hosting_minutes?: number
     followup_visa_minutes?: number
+    // Admin-configurable close triggers (migration 0014) — real-world
+    // field observation showed office staff close transactions via a
+    // WhatsApp sticker and/or office-specific phrases, not fixed code-level
+    // wording. se_close_phrases layers on top of the built-in defaults;
+    // se_accept_sticker_as_close defaults to off (0) for every office.
+    se_close_phrases?: string | null
+    se_accept_sticker_as_close?: boolean
   }>()
 
   const sets: string[] = []
@@ -958,6 +965,8 @@ admin.put('/customers/:id/smart-employee', async (c) => {
   if (body.followup_confirmation_minutes !== undefined) { sets.push('followup_confirmation_minutes = ?'); binds.push(body.followup_confirmation_minutes) }
   if (body.followup_hosting_minutes !== undefined) { sets.push('followup_hosting_minutes = ?'); binds.push(body.followup_hosting_minutes) }
   if (body.followup_visa_minutes !== undefined) { sets.push('followup_visa_minutes = ?'); binds.push(body.followup_visa_minutes) }
+  if (body.se_close_phrases !== undefined) { sets.push('se_close_phrases = ?'); binds.push(body.se_close_phrases?.trim() || null) }
+  if (body.se_accept_sticker_as_close !== undefined) { sets.push('se_accept_sticker_as_close = ?'); binds.push(body.se_accept_sticker_as_close ? 1 : 0) }
   if (sets.length === 0) return c.json({ error: 'لا توجد بيانات للتحديث' }, 400)
 
   binds.push(id)

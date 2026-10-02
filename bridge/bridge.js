@@ -266,6 +266,17 @@ async function startBridge() {
           ''
 
         const hasImage = !!msg.message.imageMessage
+        // "الزمام" PDF/Excel/Word document the agent sends alongside the ID
+        // photos (Smart Employee real-world field observation, 2026-10-02).
+        // Stored as a plain attachment reference by the Worker — not OCR'd.
+        const hasDocument = !!msg.message.documentMessage
+        // WhatsApp sticker — real offices close a transaction by sending a
+        // branded sticker (e.g. a green "ارفع المعاملة" sticker) rather than
+        // typing a fixed phrase. We cannot read which sticker image was
+        // sent, only that a stickerMessage arrived; the Worker treats any
+        // sticker in an agent group as a close signal ONLY if the office
+        // opted in via customers.se_accept_sticker_as_close (migration 0014).
+        const hasSticker = !!msg.message.stickerMessage
 
         let groupName = null
         try {
@@ -292,6 +303,33 @@ async function startBridge() {
             // photo (e.g. "UMR-260001" as the image caption). Harmless/
             // unused by the regular passport-extraction group path.
             text: msg.message.imageMessage?.caption || ''
+          })
+          if (reply) {
+            await sock.sendMessage(remoteJid, { text: reply })
+          }
+        } else if (hasDocument) {
+          const buffer = await downloadMediaMessage(msg, 'buffer', {})
+          const base64 = buffer.toString('base64')
+          const doc = msg.message.documentMessage
+          const reply = await forwardToWorker({
+            group_jid: remoteJid,
+            group_name: groupName,
+            sender_jid: senderJid,
+            type: 'document',
+            document_base64: base64,
+            mime_type: doc?.mimetype || 'application/octet-stream',
+            filename: doc?.fileName || 'document',
+            text: doc?.caption || ''
+          })
+          if (reply) {
+            await sock.sendMessage(remoteJid, { text: reply })
+          }
+        } else if (hasSticker) {
+          const reply = await forwardToWorker({
+            group_jid: remoteJid,
+            group_name: groupName,
+            sender_jid: senderJid,
+            type: 'sticker'
           })
           if (reply) {
             await sock.sendMessage(remoteJid, { text: reply })

@@ -58,7 +58,8 @@ async function advanceAfterDataReceived(
   DB: D1Database,
   tx: any,
   explicitCloseRequested: boolean,
-  defaultSupplierConversationKey: string | null
+  defaultSupplierConversationKey: string | null,
+  PASSPORTS_BUCKET?: R2Bucket
 ): Promise<string> {
   if (tx.status === 'NEW') {
     await transitionTransaction(DB, tx.id, 'RECEIVED_FROM_AGENT', null, 'system')
@@ -69,7 +70,7 @@ async function advanceAfterDataReceived(
   if (!ready) return ''
 
   if (explicitCloseRequested) {
-    return await closeTransactionToSupplier(DB, tx.id, defaultSupplierConversationKey, 'agent')
+    return await closeTransactionToSupplier(DB, tx.id, defaultSupplierConversationKey, 'agent', PASSPORTS_BUCKET)
   }
 
   if (tx.status === 'RECEIVED_FROM_AGENT') {
@@ -82,12 +83,15 @@ async function advanceAfterDataReceived(
 
 // Confirms + forwards a transaction to its supplier (or NEEDS_REVIEW if no
 // supplier is configured for this agent/office yet). Returns reply text for
-// the agent's conversation.
+// the agent's conversation. `PASSPORTS_BUCKET` is optional (not every
+// deployment configures R2 yet — see wrangler.jsonc) and is only needed to
+// auto-forward the "الزمام" document attachment, if any was sent.
 async function closeTransactionToSupplier(
   DB: D1Database,
   transactionId: number,
   supplierConversationKey: string | null,
-  changedBy: string
+  changedBy: string,
+  PASSPORTS_BUCKET?: R2Bucket
 ): Promise<string> {
   const tx = await DB.prepare('SELECT * FROM transactions WHERE id = ?').bind(transactionId).first<any>()
   if (!tx) return ''
@@ -100,6 +104,32 @@ async function closeTransactionToSupplier(
   await transitionTransaction(DB, transactionId, 'SENT_TO_SUPPLIER', null, changedBy)
   const summary = await buildTransactionSummary(DB, transactionId)
   await deliverToConversation(DB, supplierConversationKey, { kind: 'text', text: summary }).catch(() => {})
+
+  // Auto-forward any attachments ("الزمام" PDF/document) the agent sent
+  // for this transaction — this is the automated replacement for the
+  // manual WhatsApp "forward" a human previously had to do for every
+  // message (field observation, 2026-10-02).
+  if (PASSPORTS_BUCKET) {
+    const attachments = await DB.prepare(
+      `SELECT * FROM transaction_attachments WHERE transaction_id = ? AND source = 'agent' ORDER BY created_at ASC`
+    ).bind(transactionId).all<any>()
+    for (const att of attachments.results || []) {
+      if (!att.r2_key) continue
+      try {
+        const obj = await PASSPORTS_BUCKET.get(att.r2_key)
+        if (!obj) continue
+        const bytes = await obj.arrayBuffer()
+        const base64 = btoa(String.fromCharCode(...new Uint8Array(bytes)))
+        await deliverToConversation(DB, supplierConversationKey, {
+          kind: 'document', base64, mimeType: att.mime_type || 'application/octet-stream',
+          filename: att.filename || 'document', caption: `📎 مرفق معاملة ${tx.transaction_code}`
+        }).catch(() => {})
+      } catch {
+        // best-effort only — never block closing the transaction on an attachment re-upload failure
+      }
+    }
+  }
+
   await transitionTransaction(DB, transactionId, 'WAITING_HOSTING', null, 'system')
   return `\n\n✅ تم تأكيد وإرسال المعاملة ${tx.transaction_code} إلى المورد.`
 }
@@ -197,20 +227,24 @@ export async function handleAgentGroupImage(
 
   const docLabel = docType === 'iqama' ? 'إقامة' : 'جواز'
   let reply = `✅ تم استلام ${docLabel}: ${fields.full_name_ar || ''} — معاملة ${tx.transaction_code}`
-  reply += await advanceAfterDataReceived(DB, tx, false, defaultSupplierConversationKey)
+  reply += await advanceAfterDataReceived(DB, tx, false, defaultSupplierConversationKey, PASSPORTS_BUCKET)
   return reply
 }
 
 // ---------------------- Agent group: incoming TEXT ----------------------
+// `extraClosePhrases`: office-specific additional close phrases from
+// customers.se_close_phrases (migration 0014) — layered on top of the
+// built-in defaults in commands.ts, never replacing them.
 export async function handleAgentGroupText(
   deps: SmartEmployeeDeps,
   customerId: number,
   groupJid: string,
   agentId: number | null,
   defaultSupplierConversationKey: string | null,
-  text: string
+  text: string,
+  extraClosePhrases: string[] = []
 ): Promise<string | null> {
-  const { DB } = deps
+  const { DB, PASSPORTS_BUCKET } = deps
   const conversationKey = buildConversationKey({ group_jid: groupJid })
 
   const hostPhone = extractHostPhone(text)
@@ -221,9 +255,9 @@ export async function handleAgentGroupText(
 
   // ---- 1) Waiting on an explicit confirmation reply ----
   if (openTx && openTx.status === 'WAITING_AGENT_CONFIRMATION') {
-    const intent = detectTransactionIntent(text, true)
+    const intent = detectTransactionIntent(text, true, extraClosePhrases)
     if (intent === 'confirm') {
-      return (await closeTransactionToSupplier(DB, openTx.id, defaultSupplierConversationKey, 'agent')).trim()
+      return (await closeTransactionToSupplier(DB, openTx.id, defaultSupplierConversationKey, 'agent', PASSPORTS_BUCKET)).trim()
     }
     if (intent === 'reject') {
       await transitionTransaction(DB, openTx.id, 'CANCELLED', 'agent rejected confirmation', 'agent')
@@ -234,9 +268,9 @@ export async function handleAgentGroupText(
     if (hostPhone) {
       await DB.prepare('UPDATE transactions SET host_phone = ?, updated_at = datetime(\'now\') WHERE id = ?').bind(hostPhone, openTx.id).run()
     }
-    const closePhrase = detectTransactionIntent(text, false)
+    const closePhrase = detectTransactionIntent(text, false, extraClosePhrases)
     if (closePhrase === 'confirm') {
-      return (await closeTransactionToSupplier(DB, openTx.id, defaultSupplierConversationKey, 'agent')).trim()
+      return (await closeTransactionToSupplier(DB, openTx.id, defaultSupplierConversationKey, 'agent', PASSPORTS_BUCKET)).trim()
     }
     return null // unrelated chit-chat while awaiting confirmation -> stay silent
   }
@@ -251,19 +285,83 @@ export async function handleAgentGroupText(
   }
 
   // ---- 3) Explicit close command ("ارفع"/"رحّل"/...) ----
-  const intent = detectTransactionIntent(text, false)
+  const intent = detectTransactionIntent(text, false, extraClosePhrases)
   if (intent === 'confirm') {
     if (!tx) return 'ℹ️ لا توجد معاملة مفتوحة حالياً لرفعها. أرسل صور الجوازات أولاً.'
     const ready = await isTransactionReadyForConfirmation(DB, tx.id)
-    if (!ready) return `⚠️ المعاملة ${tx.transaction_code} غير مكتملة بعد (يلزم جواز واحد على الأقل + رقم المضيف).`
-    return (await closeTransactionToSupplier(DB, tx.id, defaultSupplierConversationKey, 'agent')).trim()
+    if (!ready) return `⚠️ المعاملة ${tx.transaction_code} غير مكتملة بعد (يلزم مستند هوية واحد على الأقل + رقم المضيف).`
+    return (await closeTransactionToSupplier(DB, tx.id, defaultSupplierConversationKey, 'agent', PASSPORTS_BUCKET)).trim()
   }
 
   if (reply && tx) {
-    reply += await advanceAfterDataReceived(DB, tx, false, defaultSupplierConversationKey)
+    reply += await advanceAfterDataReceived(DB, tx, false, defaultSupplierConversationKey, PASSPORTS_BUCKET)
   }
 
   return reply
+}
+
+// ---------------------- Agent group: incoming DOCUMENT ("الزمام") ----------------------
+// Stored as a plain attachment reference (NOT OCR'd — Smart Employee data
+// extraction continues to come solely from the passport/iqama IMAGE
+// messages). Attaches to the currently-open transaction (creating one if
+// none exists yet, same as a host-phone text message would), and the
+// attachment is forwarded to the supplier automatically when the
+// transaction closes (see closeTransactionToSupplier).
+export async function handleAgentGroupDocument(
+  deps: { DB: D1Database; PASSPORTS_BUCKET?: R2Bucket },
+  customerId: number,
+  groupJid: string,
+  agentId: number | null,
+  documentBase64: string,
+  mimeType: string,
+  filename: string,
+  caption: string
+): Promise<string | null> {
+  const { DB, PASSPORTS_BUCKET } = deps
+  const conversationKey = buildConversationKey({ group_jid: groupJid })
+  // Reuse the same "open transaction" matching used for text/image so the
+  // document attaches to whichever transaction is currently being built in
+  // this conversation (agents commonly send the document first, before any
+  // photo — see findOrCreateOpenTransaction).
+  const tx = await findOrCreateOpenTransaction(DB, customerId, conversationKey, agentId)
+
+  let r2Key: string | null = null
+  if (PASSPORTS_BUCKET) {
+    r2Key = `smart-employee/${customerId}/${tx.id}/doc-${Date.now()}-${filename}`
+    const bytes = Uint8Array.from(atob(documentBase64), (c) => c.charCodeAt(0))
+    await PASSPORTS_BUCKET.put(r2Key, bytes, { httpMetadata: { contentType: mimeType } }).catch(() => { r2Key = null })
+  }
+
+  await DB.prepare(
+    `INSERT INTO transaction_attachments (transaction_id, filename, mime_type, r2_key, caption, source) VALUES (?, ?, ?, ?, ?, 'agent')`
+  ).bind(tx.id, filename, mimeType, r2Key, caption || null).run()
+
+  return `📎 تم استلام المستند "${filename}" وربطه بمعاملة ${tx.transaction_code}.`
+}
+
+// ---------------------- Agent group: incoming STICKER (close signal) ----------------------
+// Real-world field observation: office staff close a transaction by
+// sending a WhatsApp sticker rather than typing a fixed phrase. We cannot
+// read which sticker image was sent — only called when the office opted in
+// via customers.se_accept_sticker_as_close (migration 0014), so ANY sticker
+// in that case counts as "رفع المعاملة" for the currently open transaction.
+export async function handleAgentGroupSticker(
+  deps: { DB: D1Database; PASSPORTS_BUCKET?: R2Bucket },
+  customerId: number,
+  groupJid: string,
+  defaultSupplierConversationKey: string | null
+): Promise<string | null> {
+  const { DB, PASSPORTS_BUCKET } = deps
+  const conversationKey = buildConversationKey({ group_jid: groupJid })
+  const tx = await DB.prepare(
+    `SELECT * FROM transactions WHERE customer_id = ? AND conversation_key = ?
+     AND status IN ('NEW','RECEIVED_FROM_AGENT','WAITING_AGENT_CONFIRMATION') ORDER BY created_at DESC LIMIT 1`
+  ).bind(customerId, conversationKey).first<any>()
+  if (!tx) return null // no open transaction -> nothing to close, stay silent
+
+  const ready = await isTransactionReadyForConfirmation(DB, tx.id)
+  if (!ready) return `⚠️ المعاملة ${tx.transaction_code} غير مكتملة بعد (يلزم مستند هوية واحد على الأقل + رقم المضيف).`
+  return (await closeTransactionToSupplier(DB, tx.id, defaultSupplierConversationKey, 'agent', PASSPORTS_BUCKET)).trim()
 }
 
 // ---------------------- Supplier group: incoming TEXT ----------------------

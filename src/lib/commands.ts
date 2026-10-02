@@ -27,25 +27,55 @@ export type TransactionIntent = 'confirm' | 'reject' | null
 
 // Explicit "close the transaction now" phrases — any of these immediately
 // confirms+forwards the transaction to the supplier, without waiting for
-// the "هل نرفع المعاملة؟" prompt.
-const TRANSACTION_CLOSE_PHRASES = ['ارفع', 'ارفعها', 'رحل', 'رحلها', 'حول', 'حولها', 'ارسلها', 'جهزها', 'خلاص ارفعها', 'خلص ارفعها']
+// the "هل نرفع المعاملة؟" prompt. Includes both singular ("ارفع") and
+// plural/"team" imperative forms ("ارفعوا") — real-world field observation
+// (2026-10-02) showed staff commonly address the group in plural form.
+// NOTE: real offices also close via a WhatsApp STICKER rather than typed
+// text at all, and some use entirely custom wording — both of those are
+// handled separately (see migration 0014: customers.se_close_phrases /
+// se_accept_sticker_as_close), this list is only the code-level default
+// that applies to every office regardless of their own settings.
+const TRANSACTION_CLOSE_PHRASES = [
+  'ارفع', 'ارفعها', 'ارفعوا', 'ارفعوها',
+  'رحل', 'رحلها', 'رحلوا', 'رحلوها',
+  'حول', 'حولها', 'حولوا', 'حولوها',
+  'ارسلها', 'ارسلوها', 'جهزها', 'جهزوها',
+  'خلاص ارفعها', 'خلص ارفعها', 'خلاص ارفعوها', 'خلص ارفعوها'
+]
 // Plain yes/no, only meaningful as a REPLY to the bot's own "هل نرفع
 // المعاملة؟" confirmation prompt for a transaction already in
 // WAITING_AGENT_CONFIRMATION — see detectTransactionIntent's `onlyAsReply` param.
 const CONFIRM_REPLY_PHRASES = ['نعم', 'ايوه', 'ايوة', 'اه', 'تمام', 'صح']
 const REJECT_REPLY_PHRASES = ['لا', 'لأ', 'لا تنشرها', 'توقف', 'الغاء']
 
+// Splits an admin-entered free-text settings field (customers.se_close_phrases)
+// into individual phrases. Accepts commas, Arabic commas, and/or newlines as
+// separators so the admin UI textarea can be as forgiving as possible.
+export function parseCustomPhraseList(raw: string | null | undefined): string[] {
+  if (!raw) return []
+  return raw.split(/[,\u060C\n\r]+/).map((p) => p.trim()).filter((p) => p.length > 0)
+}
+
 // `awaitingConfirmation` = true when the transaction is currently in
 // WAITING_AGENT_CONFIRMATION (the bot already asked "هل نرفع المعاملة؟").
 // In that state a bare "نعم"/"لا" is unambiguous. Outside that state, only
 // the explicit close phrases ("ارفع"، "رحّل"...) count — a stray "نعم" in
 // normal chat must NOT be misread as a transaction confirmation.
-export function detectTransactionIntent(rawText: string, awaitingConfirmation: boolean): TransactionIntent {
+// `extraClosePhrases`: office-specific additional close phrases from
+// customers.se_close_phrases (migration 0014), layered ON TOP OF the
+// built-in defaults above — never replacing them, so every office keeps
+// the baseline words working even if they also configure their own.
+export function detectTransactionIntent(
+  rawText: string,
+  awaitingConfirmation: boolean,
+  extraClosePhrases: string[] = []
+): TransactionIntent {
   const text = (rawText || '').trim()
   if (!text) return null
   const normalized = normalizeArabicText(text)
 
   if (TRANSACTION_CLOSE_PHRASES.some((p) => normalizeArabicText(p) === normalized)) return 'confirm'
+  if (extraClosePhrases.some((p) => normalizeArabicText(p) === normalized)) return 'confirm'
 
   if (awaitingConfirmation) {
     if (CONFIRM_REPLY_PHRASES.some((p) => normalizeArabicText(p) === normalized)) return 'confirm'

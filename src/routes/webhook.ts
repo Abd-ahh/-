@@ -4,7 +4,7 @@ import type { WhatsAppWebhookBody } from '../lib/whatsapp'
 import { downloadMedia, sendTextMessage, sendDocumentMessage, uploadMedia, markMessageRead } from '../lib/whatsapp'
 import { extractPassportData } from '../lib/gemini'
 import { extractOfficeActivationCode, matchOfficeByName, matchByCustomCommand } from '../lib/office'
-import { buildConversationKey, parseCommand } from '../lib/commands'
+import { buildConversationKey, parseCommand, parseCustomPhraseList } from '../lib/commands'
 import { handleTextCommand } from '../lib/commandHandlers'
 import { appendToCumulativeList, buildCumulativeListMessage, parseCumulativeFields } from '../lib/cumulative'
 import { getSetting, UNACTIVATED_WELCOME_KEY } from '../lib/settings'
@@ -13,7 +13,7 @@ import { runExtractionBatch } from '../lib/extractionBatch'
 import { buildResultMessage } from '../lib/passportMessage'
 import { runDueMessageLists, applyMessageListAck } from '../lib/messageLists'
 import { logConversationMessage, runDueKnowledgeBaseAnalysis, runKnowledgeBaseAnalysis, purgeOldConversationMessages } from '../lib/knowledgeBase'
-import { handleAgentGroupImage, handleAgentGroupText, handleSupplierGroupImage, handleSupplierGroupText } from '../lib/smartEmployee'
+import { handleAgentGroupImage, handleAgentGroupText, handleSupplierGroupImage, handleSupplierGroupText, handleAgentGroupDocument, handleAgentGroupSticker } from '../lib/smartEmployee'
 import { runDueFollowUpTasks } from '../lib/followUp'
 
 const SHARED_SESSION_DAYS = 30
@@ -546,10 +546,14 @@ webhook.post('/bridge/message', async (c) => {
     group_jid?: string
     group_name?: string
     sender_jid?: string
-    type?: 'text' | 'image'
+    type?: 'text' | 'image' | 'document' | 'sticker'
     text?: string
     image_base64?: string
     mime_type?: string
+    // 'document' type only (migration 0014, Smart Employee attachments —
+    // the "الزمام" PDF agents send alongside the ID photos).
+    document_base64?: string
+    filename?: string
   }
   try {
     payload = await c.req.json()
@@ -557,7 +561,7 @@ webhook.post('/bridge/message', async (c) => {
     return c.json({ error: 'invalid json' }, 400)
   }
 
-  const { group_jid, group_name, sender_jid, type, text, image_base64, mime_type } = payload
+  const { group_jid, group_name, sender_jid, type, text, image_base64, mime_type, document_base64, filename } = payload
   if (!group_jid || !sender_jid || !type) {
     return c.json({ error: 'group_jid, sender_jid and type are required' }, 400)
   }
@@ -565,6 +569,43 @@ webhook.post('/bridge/message', async (c) => {
   const startTime = Date.now()
 
   const existingGroup = await DB.prepare('SELECT * FROM whatsapp_groups WHERE group_jid = ?').bind(group_jid).first<any>()
+
+  // ---------------- Smart Employee: document ("الزمام") / sticker routing ----------------
+  // Real-world field observation (2026-10-02): office staff send the
+  // "الزمام" PDF as a WhatsApp DOCUMENT (not image) and close a transaction
+  // by sending a STICKER rather than typing a fixed phrase. Both only ever
+  // matter for an 'agent'/'supplier'-classified group with Smart Employee
+  // enabled — any other group (including every pre-existing 'bot' group)
+  // gets an empty reply here, identical to how an unrecognized image/text
+  // would have been silently ignored before this migration.
+  if (type === 'document' || type === 'sticker') {
+    if (!existingGroup || !(existingGroup.group_type === 'agent' || existingGroup.group_type === 'supplier')) {
+      return c.json({})
+    }
+    const seCustomer = await DB.prepare('SELECT * FROM customers WHERE id = ?').bind(existingGroup.customer_id).first<any>()
+    if (!seCustomer?.feature_smart_employee_enabled) return c.json({})
+
+    let seReply: string | null = null
+    if (type === 'document' && document_base64 && existingGroup.group_type === 'agent') {
+      seReply = await handleAgentGroupDocument(
+        { DB, PASSPORTS_BUCKET: c.env.PASSPORTS_BUCKET }, existingGroup.customer_id, group_jid, existingGroup.agent_id,
+        document_base64, mime_type || 'application/octet-stream', filename || 'document', text || ''
+      ).catch((err) => { console.error('handleAgentGroupDocument failed', err); return null })
+    } else if (type === 'sticker' && existingGroup.group_type === 'agent' && seCustomer.se_accept_sticker_as_close) {
+      let supplierConvKey: string | null = null
+      if (existingGroup.agent_id) {
+        const agentRow = await DB.prepare('SELECT default_supplier_id FROM agents WHERE id = ?').bind(existingGroup.agent_id).first<{ default_supplier_id: number | null }>()
+        if (agentRow?.default_supplier_id) {
+          const supplierRow = await DB.prepare('SELECT conversation_key FROM suppliers WHERE id = ?').bind(agentRow.default_supplier_id).first<{ conversation_key: string | null }>()
+          supplierConvKey = supplierRow?.conversation_key || null
+        }
+      }
+      seReply = await handleAgentGroupSticker(
+        { DB, PASSPORTS_BUCKET: c.env.PASSPORTS_BUCKET }, existingGroup.customer_id, group_jid, supplierConvKey
+      ).catch((err) => { console.error('handleAgentGroupSticker failed', err); return null })
+    }
+    return seReply ? c.json({ reply: seReply }) : c.json({})
+  }
 
   // ---------------- Text message: activation / deactivation ----------------
   if (type === 'text') {
@@ -654,7 +695,8 @@ webhook.post('/bridge/message', async (c) => {
             }
           }
           seReply = await handleAgentGroupText(
-            { DB, GEMINI_API_KEY }, existingGroup.customer_id, group_jid, existingGroup.agent_id, supplierConvKey, messageText
+            { DB, GEMINI_API_KEY }, existingGroup.customer_id, group_jid, existingGroup.agent_id, supplierConvKey, messageText,
+            parseCustomPhraseList(seCustomer.se_close_phrases)
           ).catch((err) => { console.error('handleAgentGroupText failed', err); return null })
         } else {
           seReply = await handleSupplierGroupText({ DB, GEMINI_API_KEY }, existingGroup.customer_id, messageText)

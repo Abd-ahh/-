@@ -63,6 +63,16 @@ export interface CustomerRow {
   followup_confirmation_minutes: number
   followup_hosting_minutes: number
   followup_visa_minutes: number
+  // Admin-configurable close triggers (migration 0014) — real-world field
+  // observation showed office staff close transactions with a WhatsApp
+  // STICKER and/or office-specific phrases, not a fixed code-level list.
+  // se_close_phrases: newline/comma-separated extra phrases (on top of the
+  // built-in defaults in commands.ts), null/empty = defaults only.
+  se_close_phrases: string | null
+  // se_accept_sticker_as_close: any sticker sent in an agent group counts
+  // as an explicit close signal for the open transaction. Default 0 (off)
+  // so no office's behavior changes until an admin opts in.
+  se_accept_sticker_as_close: number
   created_at: string
 }
 
@@ -489,5 +499,21 @@ export interface AuditLogRow {
   entity_type: string | null
   entity_id: number | null
   details: string | null
+  created_at: string
+}
+
+// ---------------------- Transaction attachments (migration 0014) ----------------------
+// The "الزمام" PDF/document an agent sends alongside the ID photos — stored
+// as a reference only (not OCR'd), purely so it travels with the
+// transaction and the bot can auto-forward it to the supplier instead of a
+// human doing a manual WhatsApp "forward" of every message.
+export interface TransactionAttachmentRow {
+  id: number
+  transaction_id: number
+  filename: string | null
+  mime_type: string | null
+  r2_key: string | null
+  caption: string | null
+  source: 'agent' | 'supplier'
   created_at: string
 }
