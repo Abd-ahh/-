@@ -639,13 +639,24 @@ webhook.post('/bridge/message', async (c) => {
       }
     }
 
-    // Activation attempt (custom command first, then name pattern) — same
-    // office pool used by the shared official number.
+    // Activation attempt (custom command first, then name pattern).
+    //
+    // BUG FIX (2026-10-03): this query was copy-pasted from the OFFICIAL
+    // shared-number path above (which correctly restricts candidates to
+    // `number_mode='shared'`, since that path is literally the Meta shared
+    // number). The Baileys group bridge is a COMPLETELY SEPARATE, unofficial
+    // channel — any office, whether on a 'private' or 'shared' package,
+    // should be activatable here; `number_mode` is irrelevant to this path
+    // and must NOT be filtered on. Leaving the old 'shared' filter in place
+    // silently broke every group activation attempt once zero packages had
+    // number_mode='shared' active (real production incident, 2026-10-03:
+    // a customer's group ["مكتب النور"] could not activate under ANY name —
+    // "تفعيل", "عبدالله تفعيل", "تفعيل تجربه" all failed with "لم يتم العثور
+    // على مكتب", because `allCandidates` was unconditionally empty).
     const candidates = await DB.prepare(
       `SELECT DISTINCT cu.id, cu.name, cu.activation_code FROM customers cu
        JOIN subscriptions s ON s.customer_id = cu.id
-       JOIN packages p ON p.id = s.package_id
-       WHERE p.number_mode = 'shared' AND s.status = 'active' AND s.end_date >= datetime('now')`
+       WHERE s.status = 'active' AND s.end_date >= datetime('now')`
     ).all<{ id: number; name: string; activation_code: string | null }>()
     const allCandidates = candidates.results || []
 
