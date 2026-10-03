@@ -93,7 +93,7 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
 
 const titles = {
   overview: 'نظرة عامة', customers: 'العملاء', packages: 'الباقات',
-  numbers: 'أرقام واتساب', groups: 'مجموعات واتساب', messagelists: 'قوائم الرسائل', operations: 'سجل العمليات', test: 'اختبار الاستخراج',
+  numbers: 'أرقام واتساب', groups: 'مجموعات واتساب', bridgenumbers: 'أرقام الجسر', messagelists: 'قوائم الرسائل', operations: 'سجل العمليات', test: 'اختبار الاستخراج',
   welcome: 'رسالة الترحيب', suggestions: 'صندوق المقترحات', visachecks: 'فحوصات التأشيرات', activation: 'أوامر التفعيل',
   knowledgebase: 'قاعدة المعرفة', smartemployee: 'المعاملات والوكلاء'
 };
@@ -117,6 +117,7 @@ async function render() {
     else if (currentTab === 'packages') await renderPackages(area);
     else if (currentTab === 'numbers') await renderNumbers(area);
     else if (currentTab === 'groups') await renderGroups(area);
+    else if (currentTab === 'bridgenumbers') await renderBridgeNumbers(area);
     else if (currentTab === 'messagelists') await renderMessageLists(area);
     else if (currentTab === 'operations') await renderOperations(area);
     else if (currentTab === 'welcome') await renderWelcome(area);
@@ -554,16 +555,25 @@ async function renderNumbers(area) {
 // force-unlink one if needed. The bridge process (Baileys) runs on a
 // separate VPS and is managed outside this dashboard.
 async function renderGroups(area) {
-  const { data } = await axios.get(`${API}/whatsapp-groups`);
+  const [{ data }, { data: bnData }] = await Promise.all([
+    axios.get(`${API}/whatsapp-groups`),
+    axios.get(`${API}/bridge-numbers`)
+  ]);
+  window._bridgeNumbersCache = bnData.bridge_numbers || [];
+  const bnOptions = (list, selectedId) => list.map(bn =>
+    `<option value="${bn.id}" ${bn.id === selectedId ? 'selected' : ''}>${bn.label}${bn.phone_number ? ' (' + bn.phone_number + ')' : ''}</option>`
+  ).join('');
+
   area.innerHTML = `
     <div class="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-xl p-4 mb-5">
       <i class="fa-solid fa-circle-info ml-1"></i>
-      هذه المجموعات تُفعَّل تلقائياً من داخل واتساب (عضو يرسل "اسم المكتب تفعيل" داخل المجموعة بعد إضافة رقم الجسر لها) — هذه اللوحة لعرض الحالة وإلغاء الربط فقط.
+      هذه المجموعات تُفعَّل تلقائياً من داخل واتساب (عضو يرسل "اسم المكتب تفعيل" داخل المجموعة بعد إضافة رقم الجسر لها) — هذه اللوحة لعرض الحالة وإلغاء الربط فقط. يمكن أيضاً تغيير رقم الجسر المسؤول عن كل مجموعة (راجع تبويب "أرقام الجسر" لإدارة الأرقام نفسها).
     </div>
     <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
       <table class="w-full text-sm">
         <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
           <th class="p-4 font-medium">اسم المجموعة</th><th class="p-4 font-medium">المكتب</th>
+          <th class="p-4 font-medium">رقم الجسر</th>
           <th class="p-4 font-medium">تاريخ التفعيل</th><th class="p-4 font-medium"></th>
         </tr></thead>
         <tbody>
@@ -571,9 +581,14 @@ async function renderGroups(area) {
             <tr class="border-b border-gray-50">
               <td class="p-4 font-semibold">${g.group_name || '-'}</td>
               <td class="p-4 text-gray-500">${g.customer_name}</td>
+              <td class="p-4">
+                <select onchange="changeGroupBridgeNumber(${g.id}, this.value)" class="border border-gray-200 rounded-lg px-2 py-1 text-xs">
+                  ${bnOptions(window._bridgeNumbersCache, g.bridge_number_id)}
+                </select>
+              </td>
               <td class="p-4 text-gray-400 text-xs">${fmtDate(g.created_at)}</td>
               <td class="p-4"><button onclick="deleteGroup(${g.id})" class="text-red-500 hover:underline text-xs font-bold">إلغاء الربط</button></td>
-            </tr>`).join('') || '<tr><td colspan="4" class="p-8 text-center text-gray-400">لا توجد مجموعات مفعّلة حالياً</td></tr>'}
+            </tr>`).join('') || '<tr><td colspan="5" class="p-8 text-center text-gray-400">لا توجد مجموعات مفعّلة حالياً</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -584,6 +599,142 @@ window.deleteGroup = async function (id) {
   if (!confirm('تأكيد إلغاء ربط هذه المجموعة؟')) return;
   await axios.delete(`${API}/whatsapp-groups/${id}`);
   render();
+};
+
+window.changeGroupBridgeNumber = async function (groupId, bridgeNumberId) {
+  try {
+    await axios.put(`${API}/whatsapp-groups/${groupId}/bridge-number`, { bridge_number_id: parseInt(bridgeNumberId, 10) });
+  } catch (err) {
+    alert('فشل تغيير رقم الجسر: ' + (err?.response?.data?.error || err.message));
+    render();
+  }
+};
+
+// ---------------- Bridge Numbers (multi-number support) ----------------
+// Lets the admin register multiple Baileys bridge numbers (each one still
+// needs its OWN running bridge.js process on the VPS — see
+// bridge/ecosystem.config.cjs — this tab only manages the dashboard-side
+// metadata + shows self-reported live status, it never starts/stops a
+// VPS process itself).
+const bridgeStatusBadge = (status) => {
+  const map = {
+    pending: ['bg-gray-100 text-gray-500', 'لم يبدأ بعد'],
+    connecting: ['bg-amber-50 text-amber-700', 'جاري الربط'],
+    connected: ['bg-emerald-50 text-emerald-700', 'متصل'],
+    disconnected: ['bg-red-50 text-red-700', 'غير متصل']
+  };
+  const [cls, label] = map[status] || map.pending;
+  return `<span class="text-xs font-bold px-2.5 py-1 rounded-full ${cls}">${label}</span>`;
+};
+
+async function renderBridgeNumbers(area) {
+  const { data } = await axios.get(`${API}/bridge-numbers`);
+  area.innerHTML = `
+    <div class="bg-blue-50 border border-blue-200 text-blue-800 text-sm rounded-xl p-4 mb-5">
+      <i class="fa-solid fa-circle-info ml-1"></i>
+      كل رقم مُسجَّل هنا يحتاج عملية <code>bridge.js</code> مستقلة فعلياً تعمل على VPS (راجع <code>bridge/ecosystem.config.cjs</code>) — هذه اللوحة فقط لتسجيل الأرقام وتتبّع حالتها المُبلَّغة تلقائياً من كل عملية، ولا تبدأ/توقف أي عملية بنفسها.
+    </div>
+    <div class="flex justify-end mb-4">
+      <button onclick="openAddBridgeNumberModal()" class="bg-brand-600 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-brand-700"><i class="fa-solid fa-plus ml-1"></i> إضافة رقم جسر</button>
+    </div>
+    <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
+          <th class="p-4 font-medium">#</th><th class="p-4 font-medium">التسمية</th><th class="p-4 font-medium">رقم الهاتف</th>
+          <th class="p-4 font-medium">الحالة</th><th class="p-4 font-medium">مجموعات مرتبطة</th>
+          <th class="p-4 font-medium">آخر ظهور</th><th class="p-4 font-medium"></th>
+        </tr></thead>
+        <tbody>
+          ${(data.bridge_numbers || []).map(bn => `
+            <tr class="border-b border-gray-50">
+              <td class="p-4 text-gray-400">${bn.id}</td>
+              <td class="p-4 font-semibold">${bn.label}</td>
+              <td class="p-4 text-gray-500">${bn.phone_number || '-'}</td>
+              <td class="p-4">${bridgeStatusBadge(bn.status)}${bn.status_detail ? `<div class="text-xs text-gray-400 mt-1">${bn.status_detail}</div>` : ''}</td>
+              <td class="p-4 text-gray-500">${bn.linked_groups_count}</td>
+              <td class="p-4 text-gray-400 text-xs">${bn.last_seen_at ? fmtDate(bn.last_seen_at) : '-'}</td>
+              <td class="p-4 flex gap-2">
+                <button onclick="openEditBridgeNumberModal(${bn.id})" class="text-brand-600 hover:underline text-xs font-bold">تعديل</button>
+                ${bn.id !== 1 ? `<button onclick="deleteBridgeNumber(${bn.id})" class="text-red-500 hover:underline text-xs font-bold">حذف</button>` : ''}
+              </td>
+            </tr>`).join('') || '<tr><td colspan="7" class="p-8 text-center text-gray-400">لا توجد أرقام جسر مُسجَّلة</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+    <div id="bridge-number-modal-root"></div>
+  `;
+  window._bridgeNumbersCache = data.bridge_numbers || [];
+}
+
+window.openAddBridgeNumberModal = function () {
+  renderBridgeNumberModal(null);
+};
+
+window.openEditBridgeNumberModal = function (id) {
+  const bn = (window._bridgeNumbersCache || []).find(b => b.id === id);
+  renderBridgeNumberModal(bn || null);
+};
+
+function renderBridgeNumberModal(bn) {
+  const root = document.getElementById('bridge-number-modal-root');
+  const isEdit = !!bn;
+  root.innerHTML = `
+    <div class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onclick="if(event.target===this) this.remove()">
+      <div class="bg-white rounded-2xl p-6 w-full max-w-md mx-4">
+        <h3 class="font-bold text-lg mb-4">${isEdit ? 'تعديل رقم الجسر' : 'إضافة رقم جسر جديد'}</h3>
+        <div class="space-y-3">
+          <div>
+            <label class="text-xs text-gray-500 block mb-1">التسمية (للعرض فقط)</label>
+            <input id="bn-label" type="text" value="${bn?.label || ''}" placeholder="مثال: رقم مكاتب صنعاء" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div>
+            <label class="text-xs text-gray-500 block mb-1">رقم الهاتف (اختياري، أرقام فقط بالمفتاح الدولي)</label>
+            <input id="bn-phone" type="text" value="${bn?.phone_number || ''}" placeholder="9665XXXXXXXX" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm" dir="ltr">
+          </div>
+          ${isEdit ? `
+          <label class="flex items-center gap-2 text-sm">
+            <input id="bn-active" type="checkbox" ${bn.is_active ? 'checked' : ''}>
+            مفعّل
+          </label>` : `
+          <div class="bg-amber-50 text-amber-700 text-xs rounded-lg p-3">
+            بعد الإضافة، سجّل الـ id الظاهر في الجدول ثم أضف عملية bridge.js جديدة له على VPS (راجع تعليمات <code>bridge/ecosystem.config.cjs</code> والقسم المخصص في README).
+          </div>`}
+        </div>
+        <div class="flex gap-2 mt-5">
+          <button onclick="saveBridgeNumber(${isEdit ? bn.id : 'null'})" class="flex-1 bg-brand-600 text-white py-2 rounded-xl font-bold text-sm hover:bg-brand-700">حفظ</button>
+          <button onclick="document.getElementById('bridge-number-modal-root').innerHTML=''" class="flex-1 bg-gray-100 py-2 rounded-xl font-bold text-sm">إلغاء</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+window.saveBridgeNumber = async function (id) {
+  const label = document.getElementById('bn-label').value.trim();
+  const phone_number = document.getElementById('bn-phone').value.trim();
+  if (!label) { alert('التسمية مطلوبة'); return; }
+  try {
+    if (id) {
+      const is_active = document.getElementById('bn-active').checked;
+      await axios.put(`${API}/bridge-numbers/${id}`, { label, phone_number, is_active });
+    } else {
+      await axios.post(`${API}/bridge-numbers`, { label, phone_number });
+    }
+    document.getElementById('bridge-number-modal-root').innerHTML = '';
+    render();
+  } catch (err) {
+    alert('فشل الحفظ: ' + (err?.response?.data?.error || err.message));
+  }
+};
+
+window.deleteBridgeNumber = async function (id) {
+  if (!confirm('تأكيد حذف هذا الرقم؟ (لن يُحذف إن كانت هناك مجموعات مرتبطة به بعد)')) return;
+  try {
+    await axios.delete(`${API}/bridge-numbers/${id}`);
+    render();
+  } catch (err) {
+    alert('فشل الحذف: ' + (err?.response?.data?.error || err.message));
+  }
 };
 
 // ---------------- Message Lists (قوائم رسائل) — scheduled WhatsApp broadcast lists ----------------
@@ -691,26 +842,45 @@ function recurrenceLabel(r) {
 }
 
 // ---- Contact modal ----
-window.openMlContactModal = function (id) {
+window.openMlContactModal = async function (id) {
   const ct = id ? mlContactsCache.find(c => c.id === id) : null;
   const modal = document.getElementById('modal-root');
+  // Multi-number bridge support: let the admin pick which bridge number
+  // delivers to this contact (only meaningful for channel='number' — a
+  // 'group' contact is always routed via its own group's assigned bridge
+  // number instead, see "مجموعات واتساب" tab). Fetched fresh here since
+  // the cache may not be populated if the admin never opened that tab.
+  let bridgeNumbers = window._bridgeNumbersCache;
+  if (!bridgeNumbers) {
+    try {
+      const { data } = await axios.get(`${API}/bridge-numbers`);
+      bridgeNumbers = window._bridgeNumbersCache = data.bridge_numbers || [];
+    } catch { bridgeNumbers = []; }
+  }
+  const bnOptions = bridgeNumbers.map(bn =>
+    `<option value="${bn.id}" ${(ct ? ct.bridge_number_id : 1) === bn.id ? 'selected' : ''}>${bn.label}${bn.phone_number ? ' (' + bn.phone_number + ')' : ''}</option>`
+  ).join('');
   modal.innerHTML = `
     <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div class="bg-white rounded-2xl p-6 w-full max-w-md">
         <h3 class="font-bold text-lg mb-4">${ct ? 'تعديل جهة اتصال' : 'جهة اتصال جديدة'}</h3>
         <div class="space-y-3">
-          <input id="mc-name" value="${ct ? ct.name : ''}" placeholder="الاسم (مثال: وكيل صنعاء - أحمد)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="mc-name" value="${ct ? ct.name : ''}" placeholder="الاسم (ممثال: وكيل صنعاء - أحمد)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
           <select id="mc-channel" class="w-full border border-gray-200 rounded-xl px-4 py-2.5">
             <option value="number" ${!ct || ct.channel === 'number' ? 'selected' : ''}>رقم واتساب فردي</option>
             <option value="group" ${ct && ct.channel === 'group' ? 'selected' : ''}>مجموعة واتساب (JID)</option>
           </select>
           <input id="mc-value" value="${ct ? ct.value : ''}" dir="ltr" placeholder="رقم الهاتف (967778260004) أو JID المجموعة" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
-          <input id="mc-region" value="${ct && ct.region ? ct.region : ''}" placeholder="المنطقة (اختياري، مثال: صنعاء)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="mc-region" value="${ct && ct.region ? ct.region : ''}" placeholder="المنطقة (اختياري، ممثال: صنعاء)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <div>
+            <label class="text-xs text-gray-500 block mb-1">رقم الجسر المسلّم (للرقم الفردي فقط)</label>
+            <select id="mc-bridge-number" class="w-full border border-gray-200 rounded-xl px-4 py-2.5">${bnOptions}</select>
+          </div>
         </div>
         <div id="mc-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-3"></div>
         <div class="flex gap-3 mt-5">
           <button onclick="submitMlContact(${id || 'null'})" class="flex-1 bg-brand-600 text-white font-bold py-2.5 rounded-xl">حفظ</button>
-          <button onclick="closeModal()" class="flex-1 bg-gray-100 text-gray-700 font-bold py-2.5 rounded-xl">إلغاء</button>
+          <button onclick="closeModal()" class="flex-1 bg-gray-100 text-gray-700 font-bold py-2.5 rounded-xl">إلفاء</button>
         </div>
       </div>
     </div>
@@ -723,7 +893,8 @@ window.submitMlContact = async function (id) {
     name: document.getElementById('mc-name').value.trim(),
     channel: document.getElementById('mc-channel').value,
     value: document.getElementById('mc-value').value.trim(),
-    region: document.getElementById('mc-region').value.trim() || null
+    region: document.getElementById('mc-region').value.trim() || null,
+    bridge_number_id: parseInt(document.getElementById('mc-bridge-number').value, 10) || 1
   };
   const errEl = document.getElementById('mc-error');
   try {

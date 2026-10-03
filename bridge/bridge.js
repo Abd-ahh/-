@@ -10,12 +10,36 @@
 // extraction pipeline used for the official number, and returns a reply
 // that this bridge sends back into the group.
 //
-// Run with PM2 (see ecosystem.config.cjs). Required env vars:
-//   WORKER_URL      - e.g. https://passport-ai-whatsapp.pages.dev
-//   BRIDGE_SECRET   - shared secret, must match the Worker's BRIDGE_SECRET
-//   PAIR_PHONE      - (only needed once, for first-time linking) the phone
-//                     number to link, digits only with country code,
-//                     e.g. 9665XXXXXXXX (no +, no spaces)
+// --- Multi-number support (2026-10-03) ---
+// A single VPS can run SEVERAL bridge.js processes side by side, each one
+// a completely separate WhatsApp number/Baileys socket (see
+// ecosystem.config.cjs's bridgeNumbers array). BRIDGE_NUMBER_ID identifies
+// which registered bridge_numbers row (created from the admin panel, see
+// src/routes/admin.ts's /bridge-numbers endpoints) THIS process instance
+// is. It is sent with every forwarded message and used to:
+//   - keep each number's auth_state in its own subfolder (auth_state/<id>)
+//     so pairing one number can never touch another's saved session
+//   - filter the outbox poll (GET /bridge/outbox?bridge_number_id=<id>) so
+//     a process only ever tries to deliver items meant for ITS OWN socket
+//   - self-report live connection status to the Worker (POST
+//     /bridge/numbers/<id>/status) so the admin panel shows real status
+//     without ever needing direct access to the VPS
+// Every env var below defaults such that a single-number setup (the
+// original behavior) keeps working completely unchanged if
+// BRIDGE_NUMBER_ID is simply left unset (defaults to "1", matching the
+// bridge_numbers row the 0015 migration auto-creates for pre-existing
+// installs).
+//
+// Run with PM2 (see ecosystem.config.cjs — ONE app block per number).
+// Required env vars:
+//   WORKER_URL       - e.g. https://passport-ai-whatsapp.pages.dev
+//   BRIDGE_SECRET    - shared secret, must match the Worker's BRIDGE_SECRET
+//   BRIDGE_NUMBER_ID - (optional, default "1") the bridge_numbers.id this
+//                      process instance represents. Every PM2 app in a
+//                      multi-number setup MUST use a distinct value here.
+//   PAIR_PHONE       - (only needed once, for first-time linking) the phone
+//                      number to link, digits only with country code,
+//                      e.g. 9665XXXXXXXX (no +, no spaces)
 // =========================================================
 
 import { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, Browsers } from '@whiskeysockets/baileys'
@@ -27,7 +51,15 @@ import path from 'path'
 const WORKER_URL = (process.env.WORKER_URL || 'https://passport-ai-whatsapp.pages.dev').replace(/\/$/, '')
 const BRIDGE_SECRET = process.env.BRIDGE_SECRET || ''
 const PAIR_PHONE = process.env.PAIR_PHONE || '' // digits only, e.g. 9665XXXXXXXX
-const AUTH_DIR = path.join(process.cwd(), 'auth_state')
+const BRIDGE_NUMBER_ID = parseInt(process.env.BRIDGE_NUMBER_ID || '1', 10) || 1
+// Each number gets its own auth_state subfolder so multiple processes on
+// the same VPS never share/corrupt each other's Baileys session files.
+// Number 1 (the default/original) keeps using the exact same path it
+// always used (auth_state/, no subfolder) so upgrading an existing
+// single-number install needs ZERO file moves — it just keeps working.
+const AUTH_DIR = BRIDGE_NUMBER_ID === 1
+  ? path.join(process.cwd(), 'auth_state')
+  : path.join(process.cwd(), 'auth_state', String(BRIDGE_NUMBER_ID))
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' })
 
@@ -44,7 +76,7 @@ async function forwardToWorker(payload) {
         'Content-Type': 'application/json',
         'X-Bridge-Secret': BRIDGE_SECRET
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ ...payload, bridge_number_id: BRIDGE_NUMBER_ID })
     })
     if (!resp.ok) {
       logger.error({ status: resp.status, text: await resp.text().catch(() => '') }, 'Worker responded with error')
@@ -55,6 +87,22 @@ async function forwardToWorker(payload) {
   } catch (err) {
     logger.error({ err: err?.message }, 'Failed to reach Worker')
     return null
+  }
+}
+
+// Self-reports this process's live connection state to the Worker so the
+// admin panel's "أرقام الجسر" tab can show real status (the Worker has no
+// other way to observe a VPS process's socket). Best-effort — a failed
+// report here never affects the bridge's own operation.
+async function reportStatus(status, detail, phoneNumber) {
+  try {
+    await fetch(`${WORKER_URL}/webhook/bridge/numbers/${BRIDGE_NUMBER_ID}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Bridge-Secret': BRIDGE_SECRET },
+      body: JSON.stringify({ status, detail: detail || undefined, phone_number: phoneNumber || undefined })
+    })
+  } catch (err) {
+    logger.error({ err: err?.message }, 'Failed to report bridge number status')
   }
 }
 
@@ -71,7 +119,7 @@ function base64ToBuffer(b64) {
 
 async function pollOutbox(sock) {
   try {
-    const resp = await fetch(`${WORKER_URL}/webhook/bridge/outbox?limit=10`, {
+    const resp = await fetch(`${WORKER_URL}/webhook/bridge/outbox?limit=10&bridge_number_id=${BRIDGE_NUMBER_ID}`, {
       headers: { 'X-Bridge-Secret': BRIDGE_SECRET }
     })
     if (!resp.ok) return
@@ -209,16 +257,19 @@ async function startBridge() {
           pairingRequested = true
           const code = await sock.requestPairingCode(PAIR_PHONE)
           console.log('\n=========================================')
-          console.log(`📱 PAIRING CODE for ${PAIR_PHONE}: ${code}`)
+          console.log(`📱 PAIRING CODE for ${PAIR_PHONE} (bridge_number_id=${BRIDGE_NUMBER_ID}): ${code}`)
           console.log('Open WhatsApp on that phone -> Linked Devices -> Link a Device -> Link with phone number instead, then enter this code.')
           console.log('=========================================\n')
+          reportStatus('connecting', `pairing code issued for ${PAIR_PHONE}`, PAIR_PHONE)
         } catch (err) {
           console.error('Failed to request pairing code, falling back to QR:', err?.message)
           qrcodeTerminal.generate(qr, { small: true })
+          reportStatus('connecting', 'pairing code failed, showing QR')
         }
       } else {
         console.log('\n📷 Scan this QR code with WhatsApp (Linked Devices -> Link a Device):\n')
         qrcodeTerminal.generate(qr, { small: true })
+        reportStatus('connecting', 'awaiting QR scan')
       }
     }
 
@@ -228,20 +279,37 @@ async function startBridge() {
       logger.warn({ statusCode, loggedOut }, 'Connection closed')
       if (loggedOut) {
         console.error('❌ Logged out from WhatsApp. Delete auth_state/ and restart to re-link.')
+        reportStatus('disconnected', 'logged out — needs re-pairing')
       } else {
         console.log('🔄 Reconnecting...')
+        reportStatus('disconnected', `statusCode=${statusCode}, reconnecting`)
         setTimeout(startBridge, 3000)
       }
     } else if (connection === 'open') {
       pairingRequested = false
-      console.log('✅ Connected to WhatsApp successfully. Bridge is now listening for group messages.')
-      // Start the outbox poller once the socket is actually connected.
+      console.log(`✅ Connected to WhatsApp successfully (bridge_number_id=${BRIDGE_NUMBER_ID}). Bridge is now listening for group messages.`)
+      reportStatus('connected', null, sock.user?.id ? sock.user.id.split(':')[0] : undefined)
+      // Start the outbox poller once the socket is actually connected —
+      // every number's process polls its OWN filtered queue (see pollOutbox
+      // above), so this is always safe to run on every process.
       setInterval(() => pollOutbox(sock), OUTBOX_POLL_INTERVAL_MS)
-      // Start the message-lists scheduler tick (queues due lists into group_outbox,
-      // which the poller above then delivers on its own next cycle).
-      setInterval(tickMessageLists, MESSAGE_LIST_TICK_INTERVAL_MS)
-      setInterval(tickKnowledgeBase, KNOWLEDGE_BASE_TICK_INTERVAL_MS)
-      setInterval(tickFollowUp, FOLLOW_UP_TICK_INTERVAL_MS)
+
+      // The platform-wide scheduler ticks (message lists, knowledge base,
+      // follow-up reminders) are NOT per-number — they operate across the
+      // whole platform regardless of which bridge number ends up
+      // delivering each result. Running them from every number's process
+      // in a multi-number setup would fire each one multiple times
+      // (duplicate broadcasts, duplicate analysis calls, duplicate
+      // reminders). Only the default number (id=1, always the first one
+      // configured) drives these; additional numbers (2, 3, ...) only
+      // relay group messages + their own outbox.
+      if (BRIDGE_NUMBER_ID === 1) {
+        setInterval(tickMessageLists, MESSAGE_LIST_TICK_INTERVAL_MS)
+        setInterval(tickKnowledgeBase, KNOWLEDGE_BASE_TICK_INTERVAL_MS)
+        setInterval(tickFollowUp, FOLLOW_UP_TICK_INTERVAL_MS)
+      }
+    } else if (connection === 'connecting') {
+      reportStatus('connecting')
     }
   })
 

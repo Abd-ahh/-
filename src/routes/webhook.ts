@@ -554,6 +554,12 @@ webhook.post('/bridge/message', async (c) => {
     // the "الزمام" PDF agents send alongside the ID photos).
     document_base64?: string
     filename?: string
+    // Multi-number bridge support (migration 0015): which registered
+    // bridge_numbers row this bridge.js process is running as (its own
+    // BRIDGE_NUMBER_ID env var — see bridge/bridge.js). Defaults to 1 (the
+    // original/default number) so an un-upgraded bridge.js process that
+    // never sends this field keeps working exactly as before.
+    bridge_number_id?: number
   }
   try {
     payload = await c.req.json()
@@ -562,6 +568,7 @@ webhook.post('/bridge/message', async (c) => {
   }
 
   const { group_jid, group_name, sender_jid, type, text, image_base64, mime_type, document_base64, filename } = payload
+  const bridgeNumberId = payload.bridge_number_id || 1
   if (!group_jid || !sender_jid || !type) {
     return c.json({ error: 'group_jid, sender_jid and type are required' }, 400)
   }
@@ -661,11 +668,11 @@ webhook.post('/bridge/message', async (c) => {
 
     if (matched) {
       await DB.prepare(
-        `INSERT INTO whatsapp_groups (group_jid, group_name, customer_id, activated_by_jid, updated_at)
-         VALUES (?, ?, ?, ?, datetime('now'))
+        `INSERT INTO whatsapp_groups (group_jid, group_name, customer_id, activated_by_jid, bridge_number_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, datetime('now'))
          ON CONFLICT(group_jid) DO UPDATE SET customer_id=excluded.customer_id, group_name=excluded.group_name,
-           activated_by_jid=excluded.activated_by_jid, updated_at=datetime('now')`
-      ).bind(group_jid, group_name || null, matched.id, sender_jid).run()
+           activated_by_jid=excluded.activated_by_jid, bridge_number_id=excluded.bridge_number_id, updated_at=datetime('now')`
+      ).bind(group_jid, group_name || null, matched.id, sender_jid, bridgeNumberId).run()
       return c.json({ reply: `تم ربط هذه المجموعة بمكتب ${matched.name} ✅ يمكن لأي عضو الآن إرسال صور جوازات السفر داخل المجموعة.` })
     }
 
@@ -1202,10 +1209,18 @@ webhook.get('/bridge/outbox', async (c) => {
     return c.json({ error: 'unauthorized' }, 401)
   }
   const limit = Math.min(parseInt(c.req.query('limit') || '10', 10) || 10, 50)
+  // Multi-number bridge support (migration 0015): each bridge.js process
+  // only polls for items tagged with its OWN bridge_number_id, otherwise
+  // two or more processes would race to deliver the same group's queue (or
+  // a process with no live socket in that group would grab and silently
+  // fail items meant for a different number). Defaults to 1 so an
+  // un-upgraded bridge.js (no ?bridge_number_id=) keeps its original
+  // single-number behavior unchanged.
+  const bridgeNumberId = parseInt(c.req.query('bridge_number_id') || '1', 10) || 1
 
   const pending = await DB.prepare(
-    `SELECT * FROM group_outbox WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?`
-  ).bind(limit).all<any>()
+    `SELECT * FROM group_outbox WHERE status = 'pending' AND bridge_number_id = ? ORDER BY created_at ASC LIMIT ?`
+  ).bind(bridgeNumberId, limit).all<any>()
 
   return c.json({
     items: (pending.results || []).map((r: any) => ({
@@ -1259,6 +1274,48 @@ webhook.post('/bridge/outbox/:id/ack', async (c) => {
     if (outboxRow?.send_log_id) {
       await applyMessageListAck(DB, outboxRow.send_log_id, 'failed', body.error)
     }
+  }
+  return c.json({ ok: true })
+})
+
+// =====================================================================
+// Bridge number status self-report (migration 0015, multi-number support).
+// Each bridge.js process calls this on every Baileys connection.update
+// event (connecting/open/close) so the admin panel's "أرقام الجسر" tab
+// shows live-ish status without the Worker ever touching a VPS directly —
+// it has no other way to observe a live socket's state. Reuses
+// BRIDGE_SECRET (same trust boundary as every other /bridge/* endpoint).
+// =====================================================================
+webhook.post('/bridge/numbers/:id/status', async (c) => {
+  const { DB, BRIDGE_SECRET } = c.env
+  if (!BRIDGE_SECRET || c.req.header('x-bridge-secret') !== BRIDGE_SECRET) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const id = parseInt(c.req.param('id'), 10)
+  if (!id) return c.json({ error: 'invalid id' }, 400)
+
+  let body: { status?: string; detail?: string; phone_number?: string }
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+  const status = body.status
+  if (status !== 'connecting' && status !== 'connected' && status !== 'disconnected') {
+    return c.json({ error: "status must be 'connecting' | 'connected' | 'disconnected'" }, 400)
+  }
+
+  // phone_number is only sent once the bridge process actually knows it
+  // (after a successful pairing-code request or on reconnect with an
+  // already-linked session) — never overwrite a known number with blank.
+  if (body.phone_number) {
+    await DB.prepare(
+      `UPDATE bridge_numbers SET status=?, status_detail=?, phone_number=?, last_seen_at=datetime('now'), updated_at=datetime('now') WHERE id=?`
+    ).bind(status, body.detail || null, body.phone_number, id).run()
+  } else {
+    await DB.prepare(
+      `UPDATE bridge_numbers SET status=?, status_detail=?, last_seen_at=datetime('now'), updated_at=datetime('now') WHERE id=?`
+    ).bind(status, body.detail || null, id).run()
   }
   return c.json({ ok: true })
 })

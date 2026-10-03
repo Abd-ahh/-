@@ -165,6 +165,18 @@ export async function fireMessageList(DB: D1Database, list: MessageListRow): Pro
 
   for (const contact of recipients) {
     const jid = contactToJid(contact)
+
+    // Multi-number bridge support (migration 0015): a 'group' contact must
+    // be delivered through the SAME bridge number that group is actually
+    // linked to (its own live Baileys socket), not the contact's own
+    // bridge_number_id column (which only matters for channel='number').
+    let bridgeNumberId = contact.bridge_number_id
+    if (contact.channel === 'group') {
+      const groupRow = await DB.prepare('SELECT bridge_number_id FROM whatsapp_groups WHERE group_jid = ?')
+        .bind(contact.value).first<{ bridge_number_id: number }>()
+      if (groupRow) bridgeNumberId = groupRow.bridge_number_id
+    }
+
     const logResult = await DB.prepare(
       `INSERT INTO message_list_send_log (run_id, list_id, contact_id, name_snapshot, jid_snapshot, status)
        VALUES (?, ?, ?, ?, ?, 'queued')`
@@ -172,8 +184,8 @@ export async function fireMessageList(DB: D1Database, list: MessageListRow): Pro
     const sendLogId = logResult.meta.last_row_id as number
 
     await DB.prepare(
-      `INSERT INTO group_outbox (group_jid, kind, text, send_log_id) VALUES (?, 'text', ?, ?)`
-    ).bind(jid, list.message_text, sendLogId).run()
+      `INSERT INTO group_outbox (group_jid, kind, text, send_log_id, bridge_number_id) VALUES (?, 'text', ?, ?, ?)`
+    ).bind(jid, list.message_text, sendLogId, bridgeNumberId).run()
   }
 
   // Mark done immediately — "sent_count"/"failed_count" are filled in
@@ -252,14 +264,20 @@ export interface ContactInput {
   channel: 'number' | 'group'
   value: string
   region?: string | null
+  // Multi-number bridge support (migration 0015). Only meaningful for
+  // channel='number' (group-channel contacts are routed via their own
+  // group's whatsapp_groups.bridge_number_id instead). Defaults to 1 (the
+  // original/default number) when omitted.
+  bridge_number_id?: number | null
 }
 
 export async function createContact(DB: D1Database, customerId: number, input: ContactInput): Promise<number> {
   const channel = input.channel === 'group' ? 'group' : 'number'
   const value = channel === 'number' ? (input.value || '').replace(/\D/g, '') : (input.value || '').trim()
+  const bridgeNumberId = input.bridge_number_id || 1
   const result = await DB.prepare(
-    `INSERT INTO message_contacts (customer_id, name, channel, value, region) VALUES (?, ?, ?, ?, ?)`
-  ).bind(customerId, input.name.trim(), channel, value, input.region?.trim() || null).run()
+    `INSERT INTO message_contacts (customer_id, name, channel, value, region, bridge_number_id) VALUES (?, ?, ?, ?, ?, ?)`
+  ).bind(customerId, input.name.trim(), channel, value, input.region?.trim() || null, bridgeNumberId).run()
   return result.meta.last_row_id as number
 }
 
@@ -271,9 +289,10 @@ export async function updateContact(DB: D1Database, id: number, customerId: numb
   const rawValue = input.value !== undefined ? input.value : existing.value
   const value = channel === 'number' ? (rawValue || '').replace(/\D/g, '') : (rawValue || '').trim()
   const region = input.region !== undefined ? (input.region?.trim() || null) : existing.region
+  const bridgeNumberId = input.bridge_number_id !== undefined ? (input.bridge_number_id || 1) : existing.bridge_number_id
   await DB.prepare(
-    `UPDATE message_contacts SET name=?, channel=?, value=?, region=? WHERE id=?`
-  ).bind(name, channel, value, region, id).run()
+    `UPDATE message_contacts SET name=?, channel=?, value=?, region=?, bridge_number_id=? WHERE id=?`
+  ).bind(name, channel, value, region, bridgeNumberId, id).run()
   return true
 }
 

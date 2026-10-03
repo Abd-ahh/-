@@ -577,13 +577,16 @@ admin.delete('/shared-number', async (c) => {
 // ---------------------- WhatsApp group bridge (unofficial) ----------------------
 // Read-only visibility for the admin over groups activated via the external
 // Baileys bridge (see /webhook/bridge/message). Admin can unlink a
-// misactivated/abandoned group; the bridge process itself lives on a
-// separate VPS outside this Worker's control.
+// misactivated/abandoned group, or reassign it to a different bridge
+// number; the bridge process(es) themselves live on a separate VPS outside
+// this Worker's control.
 admin.get('/whatsapp-groups', async (c) => {
   const { DB } = c.env
   const result = await DB.prepare(
-    `SELECT g.*, cu.name as customer_name FROM whatsapp_groups g
+    `SELECT g.*, cu.name as customer_name, bn.label as bridge_number_label, bn.phone_number as bridge_number_phone
+     FROM whatsapp_groups g
      JOIN customers cu ON cu.id = g.customer_id
+     LEFT JOIN bridge_numbers bn ON bn.id = g.bridge_number_id
      ORDER BY g.created_at DESC`
   ).all()
   return c.json({ groups: result.results })
@@ -592,6 +595,96 @@ admin.get('/whatsapp-groups', async (c) => {
 admin.delete('/whatsapp-groups/:id', async (c) => {
   const { DB } = c.env
   await DB.prepare('DELETE FROM whatsapp_groups WHERE id = ?').bind(c.req.param('id')).run()
+  return c.json({ success: true })
+})
+
+// Reassign which bridge number (which bridge.js process / live Baileys
+// socket) a group is reachable through — e.g. the admin moved the group
+// into a different registered number's VPS process, or is correcting a
+// mismatch. Does NOT touch the group itself in WhatsApp — the admin is
+// still responsible for actually having that bridge number's phone in the
+// group; this just updates where the Worker routes replies/outbox items.
+admin.put('/whatsapp-groups/:id/bridge-number', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const { bridge_number_id } = await c.req.json()
+  if (!bridge_number_id || typeof bridge_number_id !== 'number') {
+    return c.json({ error: 'bridge_number_id مطلوب (رقم)' }, 400)
+  }
+  const bn = await DB.prepare('SELECT id FROM bridge_numbers WHERE id = ?').bind(bridge_number_id).first()
+  if (!bn) return c.json({ error: 'رقم الجسر المحدد نادر الوجود' }, 404)
+  const result = await DB.prepare('UPDATE whatsapp_groups SET bridge_number_id = ?, updated_at = datetime(\'now\') WHERE id = ?')
+    .bind(bridge_number_id, id).run()
+  if (result.meta.rows_written === 0) return c.json({ error: 'المجموعة المحددة غير موجودة' }, 404)
+  return c.json({ success: true })
+})
+
+// ---------------------- Bridge numbers (multi-number support, migration 0015) ----------------------
+// Lets the admin register/manage multiple Baileys bridge numbers from the
+// dashboard instead of only ever having one hardcoded via the bridge.js
+// process's PAIR_PHONE env var. Each row here is purely metadata + a
+// self-reported connection status (see POST /webhook/bridge/numbers/:id/status
+// in webhook.ts) — actually running a live bridge.js process per number
+// (on the VPS, one PM2 app per number) remains a manual ops step; this API
+// does not start/stop any process.
+admin.get('/bridge-numbers', async (c) => {
+  const { DB } = c.env
+  const result = await DB.prepare(
+    `SELECT bn.*,
+       (SELECT COUNT(*) FROM whatsapp_groups g WHERE g.bridge_number_id = bn.id) as linked_groups_count
+     FROM bridge_numbers bn ORDER BY bn.id ASC`
+  ).all()
+  return c.json({ bridge_numbers: result.results })
+})
+
+admin.post('/bridge-numbers', async (c) => {
+  const { DB } = c.env
+  const { label, phone_number } = await c.req.json()
+  if (typeof label !== 'string' || !label.trim()) {
+    return c.json({ error: 'التسمية مطلوبة' }, 400)
+  }
+  const digits = typeof phone_number === 'string' ? phone_number.replace(/\D/g, '') : null
+  const result = await DB.prepare(
+    `INSERT INTO bridge_numbers (label, phone_number, status) VALUES (?, ?, 'pending')`
+  ).bind(label.trim(), digits || null).run()
+  return c.json({ success: true, id: result.meta.last_row_id })
+})
+
+admin.put('/bridge-numbers/:id', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const existing = await DB.prepare('SELECT id FROM bridge_numbers WHERE id = ?').bind(id).first()
+  if (!existing) return c.json({ error: 'الرقم المحدد نادر الوجود' }, 404)
+  const body = await c.req.json()
+  const updates: string[] = []
+  const values: any[] = []
+  if (typeof body.label === 'string' && body.label.trim()) { updates.push('label = ?'); values.push(body.label.trim()) }
+  if (typeof body.phone_number === 'string') { updates.push('phone_number = ?'); values.push(body.phone_number.replace(/\D/g, '') || null) }
+  if (typeof body.is_active === 'boolean') { updates.push('is_active = ?'); values.push(body.is_active ? 1 : 0) }
+  if (!updates.length) return c.json({ error: 'لا توجد تعديلات لحفظها' }, 400)
+  updates.push("updated_at = datetime('now')")
+  await DB.prepare(`UPDATE bridge_numbers SET ${updates.join(', ')} WHERE id = ?`).bind(...values, id).run()
+  return c.json({ success: true })
+})
+
+// Deleting a bridge number does NOT cascade to whatsapp_groups/group_outbox/
+// message_contacts rows that still reference it (those columns have no
+// FK-cascade on purpose — losing the routing info for existing links would
+// be far worse than keeping a dangling id). Admin must first reassign any
+// groups still pointing at it via PUT /whatsapp-groups/:id/bridge-number.
+// id=1 (the original/default number created by migration 0015) cannot be
+// deleted — it is the fallback every pre-existing row's DEFAULT points to.
+admin.delete('/bridge-numbers/:id', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  if (id === '1') {
+    return c.json({ error: 'لا يمكن حذف الرقم الافتراضي الاساسي (مستخدم كاحتياطي لكل المجموعات القديمة)' }, 400)
+  }
+  const linked = await DB.prepare('SELECT COUNT(*) as cnt FROM whatsapp_groups WHERE bridge_number_id = ?').bind(id).first<{ cnt: number }>()
+  if ((linked?.cnt || 0) > 0) {
+    return c.json({ error: `يوجد ${linked?.cnt} مجموعة مربوطة بهذا الرقم است. أعد ربطها برقم اخر أولاً` }, 400)
+  }
+  await DB.prepare('DELETE FROM bridge_numbers WHERE id = ?').bind(id).run()
   return c.json({ success: true })
 })
 

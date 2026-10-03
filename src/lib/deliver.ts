@@ -42,15 +42,27 @@ export async function deliverToConversation(
 
   if (parsed.channel === 'group') {
     try {
+      // Multi-number bridge support (migration 0015): route this outbox row
+      // to the SAME bridge.js process (bridge number) this group is
+      // actually linked to, not whichever one happens to be default —
+      // otherwise a reply could silently be picked up by the wrong VPS
+      // process (which has no socket open in this group at all) and never
+      // actually get delivered. Falls back to 1 (the original/default
+      // number) if the group was somehow deleted between activation and
+      // this delivery, matching the column's DB-level DEFAULT.
+      const groupRow = await DB.prepare('SELECT bridge_number_id FROM whatsapp_groups WHERE group_jid = ?')
+        .bind(parsed.group_jid).first<{ bridge_number_id: number }>()
+      const bridgeNumberId = groupRow?.bridge_number_id ?? 1
+
       if (payload.kind === 'text') {
         await DB.prepare(
-          `INSERT INTO group_outbox (group_jid, kind, text) VALUES (?, 'text', ?)`
-        ).bind(parsed.group_jid, payload.text).run()
+          `INSERT INTO group_outbox (group_jid, kind, text, bridge_number_id) VALUES (?, 'text', ?, ?)`
+        ).bind(parsed.group_jid, payload.text, bridgeNumberId).run()
       } else {
         await DB.prepare(
-          `INSERT INTO group_outbox (group_jid, kind, text, document_base64, document_mime_type, filename)
-           VALUES (?, 'document', ?, ?, ?, ?)`
-        ).bind(parsed.group_jid, payload.caption || null, payload.base64, payload.mimeType, payload.filename).run()
+          `INSERT INTO group_outbox (group_jid, kind, text, document_base64, document_mime_type, filename, bridge_number_id)
+           VALUES (?, 'document', ?, ?, ?, ?, ?)`
+        ).bind(parsed.group_jid, payload.caption || null, payload.base64, payload.mimeType, payload.filename, bridgeNumberId).run()
       }
       return { ok: true, channel: 'group' }
     } catch (err: any) {

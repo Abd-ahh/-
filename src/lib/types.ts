@@ -163,6 +163,28 @@ export interface WhatsAppGroupRow {
   group_type: 'bot' | 'agent' | 'supplier'
   agent_id: number | null
   supplier_id: number | null
+  // Multi-number bridge support (migration 0015): which bridge.js process
+  // (registered in bridge_numbers) this group is reachable through.
+  bridge_number_id: number
+  created_at: string
+  updated_at: string
+}
+
+// ---------------------- WhatsApp Group Bridge — multi-number support (migration 0015) ----------------------
+// Each row here corresponds to ONE live Baileys process (bridge.js) that
+// the admin has registered from the dashboard. The Worker itself never
+// talks to WhatsApp directly for these — it only tracks admin-entered
+// metadata + self-reported connection status, and routes group/outbox
+// traffic by bridge_number_id so the correct bridge.js process (the one
+// actually in that office's group) picks each item up.
+export interface BridgeNumberRow {
+  id: number
+  label: string
+  phone_number: string | null
+  status: 'pending' | 'connecting' | 'connected' | 'disconnected'
+  status_detail: string | null
+  is_active: boolean
+  last_seen_at: string | null
   created_at: string
   updated_at: string
 }
@@ -296,6 +318,11 @@ export interface MessageContactRow {
   channel: 'number' | 'group'
   value: string // channel='number': digits with country code; channel='group': raw group JID
   region: string | null
+  // Multi-number bridge support (migration 0015): which bridge.js process
+  // should deliver to this contact. Only meaningful for channel='number' —
+  // channel='group' contacts are routed via their group's own
+  // whatsapp_groups.bridge_number_id instead (kept in sync automatically).
+  bridge_number_id: number
   created_at: string
 }
 
