@@ -998,7 +998,7 @@ webhook.post('/bridge/message', async (c) => {
     return c.json({ reply: T.limitReached })
   }
 
-  if (!image_base64) {
+  if (!mediaBase64) {
     return c.json({ reply: T.error })
   }
 
@@ -1022,7 +1022,10 @@ webhook.post('/bridge/message', async (c) => {
       throw new Error('GEMINI_API_KEY غير مهيأ على المنصة')
     }
 
-    const extraction = await extractPassportData(GEMINI_API_KEY, image_base64, mime_type || 'image/jpeg')
+    // PDF passport support: mediaBase64 resolves to document_base64 (PDF)
+    // or image_base64 depending on isPdfGroupDocument above; mime_type is
+    // already 'application/pdf' in that case (set by the bridge).
+    const extraction = await extractPassportData(GEMINI_API_KEY, mediaBase64, mime_type || 'image/jpeg')
     const processingTime = Date.now() - startTime
 
     if (!extraction.is_passport) {

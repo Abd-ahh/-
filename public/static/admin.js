@@ -1379,8 +1379,8 @@ async function renderTest(area) {
   area.innerHTML = `
     <div class="bg-white rounded-2xl border border-gray-100 p-8 max-w-2xl">
       <h3 class="font-bold text-lg mb-2"><i class="fa-solid fa-flask text-brand-600 ml-2"></i> اختبار دقة استخراج بيانات الجواز</h3>
-      <p class="text-sm text-gray-500 mb-6">ارفع صورة جواز سفر تجريبية للتحقق من دقة Gemini في استخراج الاسم العربي والبيانات قبل ربط أرقام واتساب حقيقية.</p>
-      <input id="test-file" type="file" accept="image/*" class="w-full border border-gray-200 rounded-xl px-4 py-2.5 mb-4" />
+      <p class="text-sm text-gray-500 mb-6">ارفع صورة أو ملف PDF لجواز سفر تجريبي للتحقق من دقة Gemini في استخراج الاسم العربي والبيانات قبل ربط أرقام واتساب حقيقية.</p>
+      <input id="test-file" type="file" accept="image/*,application/pdf" class="w-full border border-gray-200 rounded-xl px-4 py-2.5 mb-4" />
       <button onclick="runTestExtraction()" id="test-btn" class="bg-brand-600 hover:bg-brand-700 text-white font-bold px-6 py-3 rounded-xl">
         <i class="fa-solid fa-magnifying-glass ml-1"></i> تحليل الصورة
       </button>
