@@ -641,15 +641,30 @@ webhook.post('/bridge/message', async (c) => {
   // "الزمام" PDF as a WhatsApp DOCUMENT (not image) and close a transaction
   // by sending a STICKER rather than typing a fixed phrase. Both only ever
   // matter for an 'agent'/'supplier'-classified group with Smart Employee
-  // enabled — any other group (including every pre-existing 'bot' group)
-  // falls through below instead (PDF passport support, feature requested
-  // 2026-10-04) rather than being silently ignored.
+  // ENABLED — any other group (including every pre-existing 'bot' group,
+  // AND an 'agent'/'supplier'-classified group whose office never turned
+  // Smart Employee on) falls through below instead (PDF passport support,
+  // feature requested 2026-10-04) rather than being silently ignored.
+  //
+  // ⚠️ BUG FIXED 2026-10-04 ("قراءة الملفات pdf غير شغالة" — office "مكتب
+  // النور" reported PDFs getting zero reply): this gate previously checked
+  // ONLY `group_type IN ('agent','supplier')` to decide whether to intercept
+  // a 'document' message, THEN separately checked feature_smart_employee_enabled
+  // and returned {} silently if it was off — never falling through to the
+  // plain-PDF-passport path below. The IMAGE routing a few dozen lines down
+  // never had this bug (it checks BOTH conditions together in its `if`), so
+  // images worked but PDFs from an agent/supplier-type group with Smart
+  // Employee OFF (e.g. a group classified 'agent' via the migration-0016
+  // self-service code, on an office that never enabled Smart Employee)
+  // silently ate every PDF. Fix: require BOTH conditions (group_type AND
+  // feature_smart_employee_enabled) up front, exactly like the image gate.
+  const seCustomerForDoc = existingGroup ? await DB.prepare('SELECT * FROM customers WHERE id = ?').bind(existingGroup.customer_id).first<any>() : null
   const isSeDocumentOrSticker = (type === 'document' || type === 'sticker') &&
-    existingGroup && (existingGroup.group_type === 'agent' || existingGroup.group_type === 'supplier')
+    existingGroup && (existingGroup.group_type === 'agent' || existingGroup.group_type === 'supplier') &&
+    seCustomerForDoc?.feature_smart_employee_enabled
 
   if (isSeDocumentOrSticker) {
-    const seCustomer = await DB.prepare('SELECT * FROM customers WHERE id = ?').bind(existingGroup.customer_id).first<any>()
-    if (!seCustomer?.feature_smart_employee_enabled) return c.json({})
+    const seCustomer = seCustomerForDoc
 
     // Shared supplier-conversation-key resolution (same pattern used by the
     // text/image branches below) — needed by BOTH the document branch (a
