@@ -312,6 +312,12 @@ window.openCustomerDetail = async function (id) {
               ${data.customer.feature_visa_check_enabled ? 'إيقاف الميزة' : 'تفعيل الميزة'}
             </button>
           </div>
+          <div class="mt-3 space-y-2">
+            <p class="text-xs text-gray-400">اسم/تسمية المكتب التي تُضاف تحت تفاصيل التأشيرة عند التسليم (اختياري — إذا تُرك فارغاً يُستخدم اسم المكتب "${data.customer.name}" تلقائياً).</p>
+            <input id="cu-visa-office-label" value="${data.customer.visa_caption_office_label || ''}" placeholder="مثال: مكتب النور للسفريات" class="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm" />
+            <div id="cu-visa-label-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2"></div>
+            <button onclick="saveVisaOfficeLabel(${id})" class="w-full bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold py-2 rounded-lg">حفظ تسمية المكتب</button>
+          </div>
         </div>
 
         <div class="mb-5">
@@ -360,6 +366,19 @@ window.saveCustomerCommands = async function (customerId) {
     render();
   } catch (err) {
     const el = document.getElementById('cu-cmd-error');
+    el.textContent = err?.response?.data?.error || 'حدث خطأ';
+    el.classList.remove('hidden');
+  }
+};
+
+window.saveVisaOfficeLabel = async function (customerId) {
+  const visa_caption_office_label = document.getElementById('cu-visa-office-label').value;
+  try {
+    await axios.put(`${API}/customers/${customerId}`, { visa_caption_office_label });
+    closeModal();
+    render();
+  } catch (err) {
+    const el = document.getElementById('cu-visa-label-error');
     el.textContent = err?.response?.data?.error || 'حدث خطأ';
     el.classList.remove('hidden');
   }

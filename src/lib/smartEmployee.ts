@@ -11,6 +11,7 @@
 import { extractPassportData, extractIqamaData, extractPhoneFromImage } from './gemini'
 import { buildConversationKey, extractHostPhone, detectTransactionIntent, extractTransactionCode, detectSupplierReplyIntent } from './commands'
 import { deliverToConversation } from './deliver'
+import { checkDuplicateDocumentInTransactionPeople, buildDuplicateWarning } from './duplicateCheck'
 import {
   generateTransactionCode, transitionTransaction, isTransactionReadyForConfirmation,
   buildTransactionSummary, CONFIRMATION_PROMPT
@@ -220,6 +221,13 @@ async function processAgentIdentityMedia(
   const lowConfidence = confidence !== null && confidence < 0.5
   const personStatus = lowConfidence ? 'needs_review' : 'extracted'
 
+  // Duplicate-document check (same conversation only) — computed BEFORE the
+  // INSERT below so it never matches the row we're about to insert.
+  const documentNumber = docType === 'passport' ? fields.passport_number : fields.id_number
+  const duplicateCheck = documentNumber
+    ? await checkDuplicateDocumentInTransactionPeople(DB, documentNumber, conversationKey).catch(() => ({ isDuplicate: false, firstSeenAt: null }))
+    : { isDuplicate: false, firstSeenAt: null }
+
   if (docType === 'passport') {
     await DB.prepare(
       `INSERT INTO transaction_people
@@ -246,7 +254,11 @@ async function processAgentIdentityMedia(
 
   if (lowConfidence) {
     await transitionTransaction(DB, tx.id, 'NEEDS_REVIEW', `ثقة استخراج منخفضة (${confidence})`, 'system')
-    return `⚠️ تم استلام المستند لكن درجة الثقة منخفضة — تم تحويل المعاملة ${tx.transaction_code} للمراجعة اليدوية.`
+    let reply = `⚠️ تم استلام المستند لكن درجة الثقة منخفضة — تم تحويل المعاملة ${tx.transaction_code} للمراجعة اليدوية.`
+    if (duplicateCheck.isDuplicate && duplicateCheck.firstSeenAt) {
+      reply += '\n\n' + buildDuplicateWarning(duplicateCheck.firstSeenAt, 'ar')
+    }
+    return reply
   }
 
   // Reply kept deliberately minimal per office request (2026-10-02): no
@@ -255,6 +267,9 @@ async function processAgentIdentityMedia(
   // messages where it's actually actionable.
   const docLabel = docType === 'iqama' ? 'إقامة' : 'جواز'
   let reply = `✅ تم استلام ${docLabel}.`
+  if (duplicateCheck.isDuplicate && duplicateCheck.firstSeenAt) {
+    reply += '\n\n' + buildDuplicateWarning(duplicateCheck.firstSeenAt, 'ar')
+  }
   reply += await advanceAfterDataReceived(DB, tx, false, defaultSupplierConversationKey, PASSPORTS_BUCKET)
   return reply
 }

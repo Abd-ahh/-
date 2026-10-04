@@ -15,6 +15,7 @@ import { runDueMessageLists, applyMessageListAck } from '../lib/messageLists'
 import { logConversationMessage, runDueKnowledgeBaseAnalysis, runKnowledgeBaseAnalysis, purgeOldConversationMessages } from '../lib/knowledgeBase'
 import { handleAgentGroupImage, handleAgentGroupText, handleSupplierGroupImage, handleSupplierGroupText, handleAgentGroupDocument, handleAgentGroupSticker } from '../lib/smartEmployee'
 import { runDueFollowUpTasks } from '../lib/followUp'
+import { checkDuplicatePassportInOperations, checkDuplicateDocumentInTransactionPeople, buildDuplicateWarning } from '../lib/duplicateCheck'
 
 const SHARED_SESSION_DAYS = 30
 
@@ -33,6 +34,30 @@ const DEFAULT_WELCOME_MESSAGE = '👋 أهلاً وسهلاً! لتفعيل ال
 //    (accepted tradeoff: ~12 checks/hour per pending passport instead of ~2).
 const VISA_CHECK_INITIAL_DELAY_MIN = 5
 const VISA_CHECK_RETRY_INTERVAL_MIN = 5
+
+// Riyadh-local (UTC+3, no DST) 'YYYY-MM-DD' date key, used to stamp
+// `umrah_visa_checks.extraction_date` with the day the passport photo was
+// received (see migration 0017) — same fixed-offset approach already used
+// in messageLists.ts / duplicateCheck.ts.
+const RIYADH_OFFSET_MIN = 3 * 60
+function riyadhDateKeyNow(): string {
+  const shifted = new Date(Date.now() + RIYADH_OFFSET_MIN * 60 * 1000)
+  const y = shifted.getUTCFullYear()
+  const m = String(shifted.getUTCMonth() + 1).padStart(2, '0')
+  const d = String(shifted.getUTCDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+// Parses the MOFA-scraped "صالحة اعتبارا من" value, observed as 'DD/MM/YYYY'
+// (see README examples e.g. "24/08/2026"), into a comparable 'YYYY-MM-DD'
+// string. Returns null if the format is unrecognized so callers can safely
+// skip the stale-date check rather than wrongly rejecting a valid visa.
+function parseMofaDateToKey(value: string): string | null {
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(value.trim())
+  if (!m) return null
+  const [, dd, mm, yyyy] = m
+  return `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`
+}
 
 // Feature 6 (Auto-Extract toggle, migration 0009): safety cap on how many
 // queued images a single "استخراج" command processes in one call, to keep
@@ -457,6 +482,17 @@ async function handleIncomingMessage(params: {
       return
     }
 
+    // Duplicate-passport check (feature requested 2026-10-04, required on
+    // every channel): look for a prior SUCCESSFUL extraction of the exact
+    // same passport_number in this exact same conversation (same sender on
+    // this same number), BEFORE persisting this new one so it never matches
+    // itself. A warning (with the earlier date/time) is appended to the
+    // normal reply below — this never blocks or alters the extraction
+    // itself, it only informs the office.
+    const duplicateCheck = extraction.passport_number
+      ? await checkDuplicatePassportInOperations(DB, extraction.passport_number, { whatsapp_number_id: numberRow.id, sender_phone: senderPhone }).catch(() => ({ isDuplicate: false, firstSeenAt: null }))
+      : { isDuplicate: false, firstSeenAt: null }
+
     // Success: persist extracted fields and increment quota usage
     await DB.batch([
       DB.prepare(
@@ -490,6 +526,14 @@ async function handleIncomingMessage(params: {
       )
     }
 
+    // Duplicate warning is sent regardless of the feature_auto_extract_enabled
+    // toggle above (it's a safety notice, not the optional detailed result).
+    if (duplicateCheck.isDuplicate && duplicateCheck.firstSeenAt) {
+      await sendTextMessage(phoneNumberId, accessToken, senderPhone, buildDuplicateWarning(duplicateCheck.firstSeenAt, lang), WHATSAPP_API_VERSION).catch((err) =>
+        console.error('sendTextMessage (duplicate warning) failed', err)
+      )
+    }
+
     // Cumulative running list (feature 2): append this extraction and
     // resend the updated numbered list, best-effort (must not affect the
     // already-successful main extraction outcome above). Gated behind the
@@ -519,9 +563,9 @@ async function handleIncomingMessage(params: {
         const firstName = fullName.split(/\s+/)[0]
         const nextCheckAt = new Date(Date.now() + VISA_CHECK_INITIAL_DELAY_MIN * 60 * 1000).toISOString()
         await DB.prepare(
-          `INSERT INTO umrah_visa_checks (operation_id, customer_id, conversation_key, passport_number, first_name, full_name, nationality, next_check_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        ).bind(operationId, customerId, conversationKey, extraction.passport_number, firstName, fullName, extraction.nationality || null, nextCheckAt).run()
+          `INSERT INTO umrah_visa_checks (operation_id, customer_id, conversation_key, passport_number, first_name, full_name, nationality, next_check_at, extraction_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(operationId, customerId, conversationKey, extraction.passport_number, firstName, fullName, extraction.nationality || null, nextCheckAt, riyadhDateKeyNow()).run()
       } catch (err) {
         console.error('Umrah visa check scheduling failed', err)
       }
@@ -1045,6 +1089,13 @@ webhook.post('/bridge/message', async (c) => {
       return c.json({ reply: T.unclear(extraction.clarity_reason || '') })
     }
 
+    // Duplicate-passport check (feature requested 2026-10-04, required on
+    // every channel): same conversation = same WhatsApp group here. Checked
+    // BEFORE persisting this new extraction so it never matches itself.
+    const duplicateCheck = extraction.passport_number
+      ? await checkDuplicatePassportInOperations(DB, extraction.passport_number, { group_jid }).catch(() => ({ isDuplicate: false, firstSeenAt: null }))
+      : { isDuplicate: false, firstSeenAt: null }
+
     await DB.batch([
       DB.prepare(
         `UPDATE operations SET status='success', full_name_ar=?, full_name_en=?, passport_number=?,
@@ -1071,6 +1122,12 @@ webhook.post('/bridge/message', async (c) => {
     // this one) so it still reaches the group even when this is off.
     let reply = customer?.feature_auto_extract_enabled ? T.result(extraction) : ''
 
+    // Duplicate warning is appended regardless of the feature_auto_extract_enabled
+    // toggle above (it's a safety notice, not the optional detailed result).
+    if (duplicateCheck.isDuplicate && duplicateCheck.firstSeenAt) {
+      reply += (reply ? '\n\n' : '') + buildDuplicateWarning(duplicateCheck.firstSeenAt, lang)
+    }
+
     // Cumulative running list (feature 2) + periodic Umrah visa auto-check
     // (feature 4): same behavior as the private/shared-number path, but this
     // handler only returns a single `reply` string per incoming message (the
@@ -1093,9 +1150,9 @@ webhook.post('/bridge/message', async (c) => {
         const firstName = fullName.split(/\s+/)[0]
         const nextCheckAt = new Date(Date.now() + VISA_CHECK_INITIAL_DELAY_MIN * 60 * 1000).toISOString()
         await DB.prepare(
-          `INSERT INTO umrah_visa_checks (operation_id, customer_id, conversation_key, passport_number, first_name, full_name, nationality, next_check_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        ).bind(operationId, customerId, groupConversationKey, extraction.passport_number, firstName, fullName, extraction.nationality || null, nextCheckAt).run()
+          `INSERT INTO umrah_visa_checks (operation_id, customer_id, conversation_key, passport_number, first_name, full_name, nationality, next_check_at, extraction_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(operationId, customerId, groupConversationKey, extraction.passport_number, firstName, fullName, extraction.nationality || null, nextCheckAt, riyadhDateKeyNow()).run()
       } catch (err) {
         console.error('Umrah visa check scheduling failed (group)', err)
       }
@@ -1186,8 +1243,9 @@ webhook.get('/visa-checks/pending', async (c) => {
 // to the older simple caption if visa_type/valid_from weren't provided
 // (e.g. MOFA page layout changed and the scrape came up empty) so delivery
 // never silently fails just because the extra detail is missing.
-function buildVisaReadyCaption(check: any, visaType?: string | null, validFrom?: string | null): string {
+function buildVisaReadyCaption(check: any, visaType?: string | null, validFrom?: string | null, officeLabel?: string | null): string {
   const name = check.full_name || check.first_name
+  let caption: string
   if (visaType || validFrom) {
     const lines = [
       '✨ تأشيرتك جاهزة ! ✅',
@@ -1196,9 +1254,16 @@ function buildVisaReadyCaption(check: any, visaType?: string | null, validFrom?:
     ]
     if (visaType) lines.push(`نوع التأشيرة: ${visaType}`)
     if (validFrom) lines.push(`صالحة اعتباراً من : ${validFrom}`)
-    return lines.join('\n')
+    caption = lines.join('\n')
+  } else {
+    caption = `✅ تأشيرة العمرة الخاصة بـ ${check.first_name} (${check.passport_number}) جاهزة.`
   }
-  return `✅ تأشيرة العمرة الخاصة بـ ${check.first_name} (${check.passport_number}) جاهزة.`
+  // Office-name label (feature requested 2026-10-04): appended UNDER the
+  // visa details, admin-editable per office via customers.visa_caption_office_label
+  // (falls back to the office's own customers.name when left blank — see
+  // migration 0017 and admin.ts PUT /customers/:id).
+  if (officeLabel) caption += `\n${officeLabel}`
+  return caption
 }
 
 // POST /webhook/visa-checks/:id/result
@@ -1231,6 +1296,31 @@ webhook.post('/visa-checks/:id/result', async (c) => {
   if (body.status === 'found') {
     if (!body.pdf_base64) return c.json({ error: 'pdf_base64 is required when status=found' }, 400)
 
+    // Stale-visa-date guard (feature requested 2026-10-04): "يتم طباعه
+    // التأشيرة التي تاريخها بعد تلقي صورة الجواز" — a visa whose own
+    // `valid_from` date is BEFORE the date this passport photo was
+    // received (`check.extraction_date`) is almost certainly an old,
+    // previously-issued visa that MOFA's search matched again, NOT the
+    // new one this specific extraction is waiting for. Reject it the same
+    // way `not_ready` is handled (reschedule +VISA_CHECK_RETRY_INTERVAL_MIN)
+    // instead of delivering it — the checker keeps retrying automatically.
+    // If the date can't be parsed, or extraction_date wasn't recorded
+    // (rows scheduled before migration 0017), skip the check and deliver
+    // as before rather than risk blocking a legitimate visa.
+    if (body.valid_from && check.extraction_date) {
+      const validFromKey = parseMofaDateToKey(body.valid_from)
+      if (validFromKey && validFromKey < check.extraction_date) {
+        const nextCheckAt = new Date(Date.now() + VISA_CHECK_RETRY_INTERVAL_MIN * 60 * 1000).toISOString()
+        await DB.prepare(
+          `UPDATE umrah_visa_checks SET status='pending', next_check_at=?, last_error=?, updated_at=datetime('now') WHERE id=?`
+        ).bind(nextCheckAt, `تأشيرة قديمة التاريخ (${body.valid_from}) أسبق من تاريخ استلام الجواز — أعيدت الجدولة`, id).run()
+        return c.json({ ok: true, stale: true, next_check_at: nextCheckAt })
+      }
+    }
+
+    const customer = await DB.prepare('SELECT name, visa_caption_office_label FROM customers WHERE id = ?').bind(check.customer_id).first<any>()
+    const officeLabel = customer?.visa_caption_office_label || customer?.name || null
+
     const deliverResult = await deliverToConversation(
       DB,
       check.conversation_key,
@@ -1239,7 +1329,7 @@ webhook.post('/visa-checks/:id/result', async (c) => {
         base64: body.pdf_base64,
         mimeType: body.pdf_mime_type || 'application/pdf',
         filename: `تأشيرة-عمرة-${check.passport_number}.pdf`,
-        caption: buildVisaReadyCaption(check, body.visa_type, body.valid_from)
+        caption: buildVisaReadyCaption(check, body.visa_type, body.valid_from, officeLabel)
       },
       WHATSAPP_API_VERSION
     )

@@ -1,0 +1,31 @@
+-- Two fixes requested 2026-10-04:
+--
+-- 1) "طباعة التأشيرات تضيف اسم المكتب / لا يطبع تأشيرة تاريخها قديم":
+--    a) Add an editable, per-office label that is appended under the visa
+--       details in the delivered caption (buildVisaReadyCaption in
+--       webhook.ts) — e.g. office/company branding line. Defaults to the
+--       office's own `customers.name` if left blank (no migration needed
+--       for the fallback — handled in application code), but can be
+--       customized or disabled by the admin via `visa_caption_office_label`.
+--    b) Record the exact moment each visa_check was scheduled from a
+--       passport extraction (`extraction_date`) so the Worker can reject
+--       (keep retrying instead of delivering) a MOFA visa result whose own
+--       `valid_from` date is BEFORE that passport's extraction date — i.e.
+--       a stale/previously-issued visa accidentally matched by the search,
+--       instead of the new one expected after this specific extraction.
+ALTER TABLE customers ADD COLUMN visa_caption_office_label TEXT; -- NULL = fall back to customers.name
+ALTER TABLE umrah_visa_checks ADD COLUMN extraction_date TEXT; -- 'YYYY-MM-DD', Riyadh-local, date the passport photo was received
+
+-- 2) "التنبيه عند إرسال/استلام صورة أو ملف جواز مكرر": detect when the same
+--    passport_number was already extracted before for the exact same
+--    conversation (whatsapp_number private chat OR whatsapp group), and
+--    reply with a one-line warning (date + time of the earlier submission)
+--    appended to the normal extraction reply, across every channel (Cloud
+--    API private/shared number, group bridge plain 'bot' groups, the
+--    "استخراج" batch drain path, and Smart Employee agent group passports).
+-- No new table/column needed — `operations` already stores passport_number
+-- + conversation identity (sender_phone+whatsapp_number_id OR group_jid) +
+-- created_at for every successful extraction; the duplicate lookup is a
+-- plain SELECT against existing columns (see checkDuplicatePassport() in
+-- src/lib/duplicateCheck.ts). This comment documents the decision not to
+-- add new schema for it.

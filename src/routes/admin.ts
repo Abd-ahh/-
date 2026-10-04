@@ -225,6 +225,11 @@ admin.put('/customers/:id', async (c) => {
   const welcome_message = body.welcome_message !== undefined ? (body.welcome_message || null) : existing.welcome_message
   const actCode = body.activation_code !== undefined ? (body.activation_code?.trim() || null) : existing.activation_code
   const deactCode = body.deactivation_code !== undefined ? (body.deactivation_code?.trim() || null) : existing.deactivation_code
+  // Visa caption office label (feature requested 2026-10-04): free-text,
+  // no uniqueness check needed (it's just a display line, not a matching
+  // key) — NULL/blank means buildVisaReadyCaption() falls back to the
+  // office's own `name`.
+  const visaOfficeLabel = body.visa_caption_office_label !== undefined ? (body.visa_caption_office_label?.trim() || null) : existing.visa_caption_office_label
 
   if (actCode && (await checkDuplicateCommand(DB, 'activation_code', actCode, id))) {
     return c.json({ error: 'أمر التفعيل مستخدم بالفعل من مكتب آخر، الرجاء اختيار أمر مختلف' }, 400)
@@ -234,8 +239,8 @@ admin.put('/customers/:id', async (c) => {
   }
 
   await DB.prepare(
-    'UPDATE customers SET name=?, phone=?, status=?, reply_language=?, welcome_message=?, activation_code=?, deactivation_code=? WHERE id=?'
-  ).bind(name, phone, status, reply_language, welcome_message, actCode, deactCode, id).run()
+    'UPDATE customers SET name=?, phone=?, status=?, reply_language=?, welcome_message=?, activation_code=?, deactivation_code=?, visa_caption_office_label=? WHERE id=?'
+  ).bind(name, phone, status, reply_language, welcome_message, actCode, deactCode, visaOfficeLabel, id).run()
   return c.json({ success: true })
 })
 

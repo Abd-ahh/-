@@ -19,6 +19,7 @@ import { downloadMedia } from './whatsapp'
 import { extractPassportData } from './gemini'
 import { buildResultMessage } from './passportMessage'
 import { appendToCumulativeList, buildCumulativeListMessage, parseCumulativeFields } from './cumulative'
+import { checkDuplicatePassportInOperations, buildDuplicateWarning } from './duplicateCheck'
 
 export interface ExtractionBatchDeps {
   DB: D1Database
@@ -151,6 +152,17 @@ export async function runExtractionBatch(
         continue
       }
 
+      // Duplicate-passport check (feature requested 2026-10-04, required on
+      // every channel, including the "استخراج" batch drain path): checked
+      // BEFORE persisting this new extraction so it never matches itself.
+      const duplicateCheck = extraction.passport_number
+        ? await checkDuplicatePassportInOperations(
+            DB,
+            extraction.passport_number,
+            row.channel === 'number' ? { whatsapp_number_id: row.whatsapp_number_id, sender_phone: row.sender_phone } : { group_jid: row.group_jid }
+          ).catch(() => ({ isDuplicate: false, firstSeenAt: null }))
+        : { isDuplicate: false, firstSeenAt: null }
+
       await DB.batch([
         DB.prepare(
           `UPDATE operations SET status='success', image_key=?, full_name_ar=?, full_name_en=?, passport_number=?,
@@ -175,6 +187,10 @@ export async function runExtractionBatch(
         ? await DB.prepare('SELECT extraction_fields FROM whatsapp_numbers WHERE id = ?').bind(row.whatsapp_number_id).first<{ extraction_fields: string | null }>().then((r) => r?.extraction_fields ?? null)
         : null
       let message = buildResultMessage(extraction, lang, extractionFieldsRaw)
+
+      if (duplicateCheck.isDuplicate && duplicateCheck.firstSeenAt) {
+        message += '\n\n' + buildDuplicateWarning(duplicateCheck.firstSeenAt, lang)
+      }
 
       if (customer?.feature_cumulative_list_enabled) {
         try {
