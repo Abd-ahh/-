@@ -279,11 +279,21 @@ async function handleIncomingMessage(params: {
 
   const conversationKey = buildConversationKey({ whatsapp_number_id: numberRow.id, sender_phone: senderPhone })
 
+  // PDF passport support (feature requested 2026-10-04): offices also send
+  // the passport page as a scanned PDF document rather than a photo —
+  // Gemini's inline_data accepts PDF bytes exactly like image bytes (same
+  // approach already proven in smartEmployee.ts's handleAgentGroupDocument),
+  // so a 'document' message whose mime_type is application/pdf is treated
+  // as equivalent to an 'image' message for the extraction pipeline below.
+  // Any other document type (Word/Excel/etc.) is NOT a passport page and
+  // falls through to the non-image branch unchanged.
+  const isPdfDocument = msg.type === 'document' && msg.document?.mime_type === 'application/pdf'
+
   // Non-image messages: first try explicit commands (check-now, list,
   // report, suggestion) — these work identically whether the number is
   // private/dedicated or shared. Anything else falls back to the existing
   // per-customer welcome_message / notImage guidance (unchanged).
-  if (msg.type !== 'image') {
+  if (msg.type !== 'image' && !isPdfDocument) {
     if (msg.type === 'text' && msg.text?.body) {
       // Knowledge Base (feature requested 2026-08-24): log every inbound
       // text message so office FAQs/answers can be mined later. On this
@@ -405,13 +415,18 @@ async function handleIncomingMessage(params: {
       throw new Error('GEMINI_API_KEY غير مهيأ على المنصة')
     }
 
-    const media = await downloadMedia(msg.image.id, accessToken, WHATSAPP_API_VERSION)
+    // PDF passport support: a document message's media id lives under
+    // msg.document.id instead of msg.image.id (see isPdfDocument above).
+    const mediaId = isPdfDocument ? msg.document.id : msg.image.id
+    const media = await downloadMedia(mediaId, accessToken, WHATSAPP_API_VERSION)
 
-    // Store image in R2 for audit trail (best-effort, non-blocking on failure).
-    // R2 binding may not be configured on every environment — guard against
-    // that instead of throwing (was previously causing "Cannot read
-    // properties of undefined (reading 'put')" and aborting the whole flow).
-    const imageKey = `passports/${customerId}/${operationId}-${Date.now()}.jpg`
+    // Store image/PDF in R2 for audit trail (best-effort, non-blocking on
+    // failure). R2 binding may not be configured on every environment —
+    // guard against that instead of throwing (was previously causing
+    // "Cannot read properties of undefined (reading 'put')" and aborting
+    // the whole flow).
+    const fileExt = isPdfDocument ? 'pdf' : 'jpg'
+    const imageKey = `passports/${customerId}/${operationId}-${Date.now()}.${fileExt}`
     if (PASSPORTS_BUCKET) {
       PASSPORTS_BUCKET.put(imageKey, media.bytes, { httpMetadata: { contentType: media.mimeType } }).catch((err) => {
         console.error('R2 put failed', err)
@@ -583,12 +598,12 @@ webhook.post('/bridge/message', async (c) => {
   // by sending a STICKER rather than typing a fixed phrase. Both only ever
   // matter for an 'agent'/'supplier'-classified group with Smart Employee
   // enabled — any other group (including every pre-existing 'bot' group)
-  // gets an empty reply here, identical to how an unrecognized image/text
-  // would have been silently ignored before this migration.
-  if (type === 'document' || type === 'sticker') {
-    if (!existingGroup || !(existingGroup.group_type === 'agent' || existingGroup.group_type === 'supplier')) {
-      return c.json({})
-    }
+  // falls through below instead (PDF passport support, feature requested
+  // 2026-10-04) rather than being silently ignored.
+  const isSeDocumentOrSticker = (type === 'document' || type === 'sticker') &&
+    existingGroup && (existingGroup.group_type === 'agent' || existingGroup.group_type === 'supplier')
+
+  if (isSeDocumentOrSticker) {
     const seCustomer = await DB.prepare('SELECT * FROM customers WHERE id = ?').bind(existingGroup.customer_id).first<any>()
     if (!seCustomer?.feature_smart_employee_enabled) return c.json({})
 
@@ -636,6 +651,106 @@ webhook.post('/bridge/message', async (c) => {
           await DB.prepare('DELETE FROM whatsapp_groups WHERE id = ?').bind(existingGroup.id).run()
           return c.json({ reply: '✅ تم إلغاء ربط هذه المجموعة بالمكتب. أرسل اسم المكتب متبوعاً بكلمة "تفعيل" للربط من جديد.' })
         }
+      }
+    }
+
+    // ---------------- Agent/Supplier self-service activation codes ----------------
+    // Feature requested 2026-10-04: "تحديد الوكيل والمورد للمكتب عن طريق
+    // انشاء رمز يتم تفعيل في المجموعه للمورد والوكيل خاص بهم مثل أوامر
+    // التفعيل" (migration 0016). Checked BEFORE the office-level activation
+    // match below so an agent/supplier code always wins even if it happens
+    // to also resemble an office name/custom command — these codes are a
+    // MORE specific match (they fully determine office + role + link in one
+    // step) and are validated unique across both tables at save time
+    // (smartEmployeeAdmin.ts), so at most one record can ever match here.
+    //
+    // Deactivation first (only meaningful if this exact group is already
+    // classified as that agent's/supplier's group) — mirrors the office-
+    // level deactivation block above, scoped one level deeper.
+    if (existingGroup && messageText && (existingGroup.group_type === 'agent' || existingGroup.group_type === 'supplier')) {
+      const linkId = existingGroup.group_type === 'agent' ? existingGroup.agent_id : existingGroup.supplier_id
+      if (linkId) {
+        const table = existingGroup.group_type === 'agent' ? 'agents' : 'suppliers'
+        const linkedRecord = await DB.prepare(`SELECT deactivation_code FROM ${table} WHERE id = ?`)
+          .bind(linkId).first<{ deactivation_code: string | null }>()
+        if (linkedRecord?.deactivation_code) {
+          const isDeactivation = matchByCustomCommand(
+            [{ id: linkId, code: linkedRecord.deactivation_code }],
+            messageText
+          )
+          if (isDeactivation) {
+            await DB.prepare(
+              `UPDATE whatsapp_groups SET group_type = 'bot', agent_id = NULL, supplier_id = NULL, updated_at = datetime('now') WHERE id = ?`
+            ).bind(existingGroup.id).run()
+            await DB.prepare(`UPDATE ${table} SET conversation_key = NULL, updated_at = datetime('now') WHERE id = ?`).bind(linkId).run()
+            return c.json({ reply: '✅ تم إلغاء ربط هذه المجموعة. يمكن إرسال رمز تفعيل وكيل/مورد آخر لربطها من جديد.' })
+          }
+        }
+      }
+    }
+
+    // Activation attempt: match the message against every active office's
+    // agents + suppliers activation_code in one combined pool. No
+    // pre-existing office link is required — the agent/supplier record
+    // already belongs to a specific office (customer_id), so a single
+    // match fully determines office + role + link together.
+    if (messageText) {
+      const [agentCodeRows, supplierCodeRows] = await Promise.all([
+        DB.prepare(
+          `SELECT a.id, a.customer_id, a.name, a.activation_code FROM agents a
+           JOIN customers cu ON cu.id = a.customer_id
+           JOIN subscriptions s ON s.customer_id = cu.id
+           WHERE a.activation_code IS NOT NULL AND a.is_active = 1
+             AND s.status = 'active' AND s.end_date >= datetime('now')`
+        ).all<{ id: number; customer_id: number; name: string; activation_code: string }>(),
+        DB.prepare(
+          `SELECT sp.id, sp.customer_id, sp.name, sp.activation_code FROM suppliers sp
+           JOIN customers cu ON cu.id = sp.customer_id
+           JOIN subscriptions s ON s.customer_id = cu.id
+           WHERE sp.activation_code IS NOT NULL AND sp.is_active = 1
+             AND s.status = 'active' AND s.end_date >= datetime('now')`
+        ).all<{ id: number; customer_id: number; name: string; activation_code: string }>()
+      ])
+
+      const agentMatch = matchByCustomCommand(
+        (agentCodeRows.results || []).map((a) => ({ id: a.id, code: a.activation_code })),
+        messageText
+      )
+      const supplierMatch = !agentMatch
+        ? matchByCustomCommand(
+            (supplierCodeRows.results || []).map((s) => ({ id: s.id, code: s.activation_code })),
+            messageText
+          )
+        : null
+
+      if (agentMatch || supplierMatch) {
+        const roleType = agentMatch ? 'agent' : 'supplier'
+        const matchedRow = agentMatch
+          ? (agentCodeRows.results || []).find((a) => a.id === agentMatch.id)!
+          : (supplierCodeRows.results || []).find((s) => s.id === supplierMatch!.id)!
+        const conversationKey = buildConversationKey({ group_jid })
+
+        await DB.prepare(
+          `INSERT INTO whatsapp_groups (group_jid, group_name, customer_id, activated_by_jid, bridge_number_id, group_type, agent_id, supplier_id, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(group_jid) DO UPDATE SET customer_id=excluded.customer_id, group_name=excluded.group_name,
+             activated_by_jid=excluded.activated_by_jid, bridge_number_id=excluded.bridge_number_id,
+             group_type=excluded.group_type, agent_id=excluded.agent_id, supplier_id=excluded.supplier_id, updated_at=datetime('now')`
+        ).bind(
+          group_jid, group_name || null, matchedRow.customer_id, sender_jid, bridgeNumberId,
+          roleType, roleType === 'agent' ? matchedRow.id : null, roleType === 'supplier' ? matchedRow.id : null
+        ).run()
+
+        // Same conversation_key auto-sync as the manual admin classification
+        // endpoint (PUT /whatsapp-groups/:id/role) — clear a stale link on
+        // the record first (it may have been pointed at a different, now-
+        // abandoned group), then point it at this group.
+        const table = roleType === 'agent' ? 'agents' : 'suppliers'
+        await DB.prepare(`UPDATE ${table} SET conversation_key = ?, updated_at = datetime('now') WHERE id = ?`)
+          .bind(conversationKey, matchedRow.id).run()
+
+        const roleLabel = roleType === 'agent' ? 'وكيل' : 'مورد'
+        return c.json({ reply: `تم ربط هذه المجموعة بـ${roleLabel} "${matchedRow.name}" ✅` })
       }
     }
 
@@ -799,10 +914,22 @@ webhook.post('/bridge/message', async (c) => {
     return c.json({})
   }
 
-  // ---------------- Image message: run the extraction pipeline ----------------
+  // ---------------- Image/PDF message: run the extraction pipeline ----------------
+  // PDF passport support (feature requested 2026-10-04): a plain 'bot'-type
+  // group (no Smart Employee role) may also receive the passport page as a
+  // PDF document instead of a photo — Gemini's inline_data accepts PDF
+  // bytes exactly like image bytes. 'sticker' and any non-PDF document type
+  // reaching this point belong to no group role that handles them -> stay
+  // silent, same as before this feature.
+  const isPdfGroupDocument = type === 'document' && mime_type === 'application/pdf'
+  if (type === 'sticker' || (type === 'document' && !isPdfGroupDocument)) {
+    return c.json({})
+  }
+  const mediaBase64 = isPdfGroupDocument ? document_base64 : image_base64
+
   if (!existingGroup) {
-    // Image sent before the group was ever activated for an office — stay
-    // silent (we don't know which office/quota to charge this to).
+    // Image/PDF sent before the group was ever activated for an office —
+    // stay silent (we don't know which office/quota to charge this to).
     return c.json({})
   }
 

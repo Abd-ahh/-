@@ -2123,14 +2123,18 @@ async function renderSeAgents(body) {
           <option value="">بدون مورد افتراضي</option>
           ${seSuppliersCache.map(s => `<option value="${s.id}">${s.name}</option>`).join('')}
         </select>
+        <input id="agent-activation-code" placeholder="رمز تفعيل المجموعة (اختياري)" class="border border-gray-200 rounded-lg px-3 py-2 text-sm" />
+        <input id="agent-deactivation-code" placeholder="رمز إلغاء الربط (اختياري)" class="border border-gray-200 rounded-lg px-3 py-2 text-sm" />
       </div>
+      <p class="text-xs text-gray-400 mt-2"><i class="fa-solid fa-circle-info ml-1"></i>لو حطيت رمز تفعيل، أي عضو يرسله داخل أي مجموعة واتساب يربطها تلقائياً بهذا الوكيل، بدون الحاجة لتصنيفها يدوياً من تبويب "المجموعات".</p>
       <button onclick="createSeAgent()" class="mt-3 bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold px-5 py-2 rounded-xl">إضافة</button>
     </div>
     <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
       <table class="w-full text-sm">
         <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
           <th class="p-4 font-medium">الاسم</th><th class="p-4 font-medium">الهاتف</th>
-          <th class="p-4 font-medium">المورد الافتراضي</th><th class="p-4 font-medium">مجموعة الواتساب</th><th class="p-4 font-medium"></th>
+          <th class="p-4 font-medium">المورد الافتراضي</th><th class="p-4 font-medium">مجموعة الواتساب</th>
+          <th class="p-4 font-medium">رمز التفعيل</th><th class="p-4 font-medium">رمز الإلغاء</th><th class="p-4 font-medium"></th>
         </tr></thead>
         <tbody>
           ${seAgentsCache.map(a => `
@@ -2140,13 +2144,22 @@ async function renderSeAgents(body) {
               <td class="p-4 text-gray-500">${a.default_supplier_name || '-'}</td>
               <td class="p-4">${a.conversation_key
                 ? '<span class="text-green-600 text-xs font-bold"><i class="fa-solid fa-circle-check ml-1"></i>مرتبطة</span>'
-                : '<span class="text-amber-600 text-xs font-bold"><i class="fa-solid fa-triangle-exclamation ml-1"></i>غير مرتبطة — اربطها من تبويب "المجموعات"</span>'}</td>
-              <td class="p-4"><button onclick="deleteSeAgent(${a.id})" class="text-red-500 hover:underline text-xs font-bold">حذف</button></td>
-            </tr>`).join('') || '<tr><td colspan="5" class="p-8 text-center text-gray-400">لا يوجد وكلاء بعد</td></tr>'}
+                : '<span class="text-amber-600 text-xs font-bold"><i class="fa-solid fa-triangle-exclamation ml-1"></i>غير مرتبطة</span>'}</td>
+              <td class="p-4">${a.activation_code
+                ? `<code class="bg-gray-50 px-2 py-1 rounded text-xs">${a.activation_code}</code>`
+                : '<span class="text-gray-300 text-xs">—</span>'}</td>
+              <td class="p-4">${a.deactivation_code
+                ? `<code class="bg-gray-50 px-2 py-1 rounded text-xs">${a.deactivation_code}</code>`
+                : '<span class="text-gray-300 text-xs">—</span>'}</td>
+              <td class="p-4 whitespace-nowrap">
+                <button onclick="editSeAgentCodes(${a.id}, '${(a.activation_code || '').replace(/'/g, "\\'")}', '${(a.deactivation_code || '').replace(/'/g, "\\'")}')" class="text-brand-600 hover:underline text-xs font-bold ml-3">تعديل الرموز</button>
+                <button onclick="deleteSeAgent(${a.id})" class="text-red-500 hover:underline text-xs font-bold">حذف</button>
+              </td>
+            </tr>`).join('') || '<tr><td colspan="7" class="p-8 text-center text-gray-400">لا يوجد وكلاء بعد</td></tr>'}
         </tbody>
       </table>
     </div>
-    <p class="text-xs text-gray-400 mt-3"><i class="fa-solid fa-circle-info ml-1"></i>بعد إضافة الوكيل، لازم تربطه بمجموعة الواتساب الخاصة فيه من تبويب "المجموعات" حتى يستقبل البوت رسائله.</p>
+    <p class="text-xs text-gray-400 mt-3"><i class="fa-solid fa-circle-info ml-1"></i>يمكن ربط مجموعة الوكيل إما يدوياً من تبويب "المجموعات"، أو تلقائياً بإرسال رمز التفعيل الخاص به داخل المجموعة.</p>
   `;
 }
 
@@ -2157,7 +2170,26 @@ window.createSeAgent = async function () {
     await axios.post(`${API}/agents`, {
       customer_id: seCustomerId, name,
       phone: document.getElementById('agent-phone').value.trim() || null,
-      default_supplier_id: Number(document.getElementById('agent-default-supplier').value) || null
+      default_supplier_id: Number(document.getElementById('agent-default-supplier').value) || null,
+      activation_code: document.getElementById('agent-activation-code').value.trim() || null,
+      deactivation_code: document.getElementById('agent-deactivation-code').value.trim() || null
+    });
+    await renderSeAgents(document.getElementById('se-sub-body'));
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+window.editSeAgentCodes = async function (id, currentActivation, currentDeactivation) {
+  const activation_code = prompt('رمز تفعيل المجموعة (اتركه فارغاً لإزالته):', currentActivation || '');
+  if (activation_code === null) return;
+  const deactivation_code = prompt('رمز إلغاء الربط (اتركه فارغاً لإزالته):', currentDeactivation || '');
+  if (deactivation_code === null) return;
+  try {
+    await axios.put(`${API}/agents/${id}`, {
+      activation_code: activation_code.trim() || null,
+      deactivation_code: deactivation_code.trim() || null
     });
     await renderSeAgents(document.getElementById('se-sub-body'));
   } catch (err) {
@@ -2184,13 +2216,17 @@ async function renderSeSuppliers(body) {
       <div class="grid sm:grid-cols-2 gap-3">
         <input id="supplier-name" placeholder="اسم المورد" class="border border-gray-200 rounded-lg px-3 py-2 text-sm" />
         <input id="supplier-phone" placeholder="رقم الهاتف (اختياري)" class="border border-gray-200 rounded-lg px-3 py-2 text-sm" />
+        <input id="supplier-activation-code" placeholder="رمز تفعيل المجموعة (اختياري)" class="border border-gray-200 rounded-lg px-3 py-2 text-sm" />
+        <input id="supplier-deactivation-code" placeholder="رمز إلغاء الربط (اختياري)" class="border border-gray-200 rounded-lg px-3 py-2 text-sm" />
       </div>
+      <p class="text-xs text-gray-400 mt-2"><i class="fa-solid fa-circle-info ml-1"></i>لو حطيت رمز تفعيل، أي عضو يرسله داخل أي مجموعة واتساب يربطها تلقائياً بهذا المورد، بدون الحاجة لتصنيفها يدوياً من تبويب "المجموعات".</p>
       <button onclick="createSeSupplier()" class="mt-3 bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold px-5 py-2 rounded-xl">إضافة</button>
     </div>
     <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
       <table class="w-full text-sm">
         <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
-          <th class="p-4 font-medium">الاسم</th><th class="p-4 font-medium">الهاتف</th><th class="p-4 font-medium">مجموعة الواتساب</th><th class="p-4 font-medium"></th>
+          <th class="p-4 font-medium">الاسم</th><th class="p-4 font-medium">الهاتف</th><th class="p-4 font-medium">مجموعة الواتساب</th>
+          <th class="p-4 font-medium">رمز التفعيل</th><th class="p-4 font-medium">رمز الإلغاء</th><th class="p-4 font-medium"></th>
         </tr></thead>
         <tbody>
           ${seSuppliersCache.map(s => `
@@ -2199,13 +2235,22 @@ async function renderSeSuppliers(body) {
               <td class="p-4 text-gray-500">${s.phone || '-'}</td>
               <td class="p-4">${s.conversation_key
                 ? '<span class="text-green-600 text-xs font-bold"><i class="fa-solid fa-circle-check ml-1"></i>مرتبطة</span>'
-                : '<span class="text-amber-600 text-xs font-bold"><i class="fa-solid fa-triangle-exclamation ml-1"></i>غير مرتبطة — اربطها من تبويب "المجموعات"</span>'}</td>
-              <td class="p-4"><button onclick="deleteSeSupplier(${s.id})" class="text-red-500 hover:underline text-xs font-bold">حذف</button></td>
-            </tr>`).join('') || '<tr><td colspan="4" class="p-8 text-center text-gray-400">لا يوجد موردون بعد</td></tr>'}
+                : '<span class="text-amber-600 text-xs font-bold"><i class="fa-solid fa-triangle-exclamation ml-1"></i>غير مرتبطة</span>'}</td>
+              <td class="p-4">${s.activation_code
+                ? `<code class="bg-gray-50 px-2 py-1 rounded text-xs">${s.activation_code}</code>`
+                : '<span class="text-gray-300 text-xs">—</span>'}</td>
+              <td class="p-4">${s.deactivation_code
+                ? `<code class="bg-gray-50 px-2 py-1 rounded text-xs">${s.deactivation_code}</code>`
+                : '<span class="text-gray-300 text-xs">—</span>'}</td>
+              <td class="p-4 whitespace-nowrap">
+                <button onclick="editSeSupplierCodes(${s.id}, '${(s.activation_code || '').replace(/'/g, "\\'")}', '${(s.deactivation_code || '').replace(/'/g, "\\'")}')" class="text-brand-600 hover:underline text-xs font-bold ml-3">تعديل الرموز</button>
+                <button onclick="deleteSeSupplier(${s.id})" class="text-red-500 hover:underline text-xs font-bold">حذف</button>
+              </td>
+            </tr>`).join('') || '<tr><td colspan="6" class="p-8 text-center text-gray-400">لا يوجد موردون بعد</td></tr>'}
         </tbody>
       </table>
     </div>
-    <p class="text-xs text-gray-400 mt-3"><i class="fa-solid fa-circle-info ml-1"></i>بعد إضافة المورد، لازم تربطه بمجموعة الواتساب الخاصة فيه من تبويب "المجموعات" حتى يستلم معاملات الوكلاء.</p>
+    <p class="text-xs text-gray-400 mt-3"><i class="fa-solid fa-circle-info ml-1"></i>يمكن ربط مجموعة المورد إما يدوياً من تبويب "المجموعات"، أو تلقائياً بإرسال رمز التفعيل الخاص به داخل المجموعة.</p>
   `;
 }
 
@@ -2215,7 +2260,26 @@ window.createSeSupplier = async function () {
   try {
     await axios.post(`${API}/suppliers`, {
       customer_id: seCustomerId, name,
-      phone: document.getElementById('supplier-phone').value.trim() || null
+      phone: document.getElementById('supplier-phone').value.trim() || null,
+      activation_code: document.getElementById('supplier-activation-code').value.trim() || null,
+      deactivation_code: document.getElementById('supplier-deactivation-code').value.trim() || null
+    });
+    await renderSeSuppliers(document.getElementById('se-sub-body'));
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+window.editSeSupplierCodes = async function (id, currentActivation, currentDeactivation) {
+  const activation_code = prompt('رمز تفعيل المجموعة (اتركه فارغاً لإزالته):', currentActivation || '');
+  if (activation_code === null) return;
+  const deactivation_code = prompt('رمز إلغاء الربط (اتركه فارغاً لإزالته):', currentDeactivation || '');
+  if (deactivation_code === null) return;
+  try {
+    await axios.put(`${API}/suppliers/${id}`, {
+      activation_code: activation_code.trim() || null,
+      deactivation_code: deactivation_code.trim() || null
     });
     await renderSeSuppliers(document.getElementById('se-sub-body'));
   } catch (err) {

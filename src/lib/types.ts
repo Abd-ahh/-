@@ -381,6 +381,10 @@ export interface AgentRow {
   notes: string | null
   default_supplier_id: number | null
   is_active: number
+  // Self-service WhatsApp group classification codes (migration 0016) --
+  // mirrors customers.activation_code/deactivation_code one level deeper.
+  activation_code: string | null
+  deactivation_code: string | null
   created_at: string
   updated_at: string
 }
@@ -393,6 +397,10 @@ export interface SupplierRow {
   phone: string | null
   notes: string | null
   is_active: number
+  // Self-service WhatsApp group classification codes (migration 0016) --
+  // mirrors customers.activation_code/deactivation_code one level deeper.
+  activation_code: string | null
+  deactivation_code: string | null
   created_at: string
   updated_at: string
 }
