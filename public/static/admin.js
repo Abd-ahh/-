@@ -2160,7 +2160,12 @@ async function renderSeAgents(body) {
             <tr class="border-b border-gray-50">
               <td class="p-4 font-semibold">${a.name}</td>
               <td class="p-4 text-gray-500">${a.phone || '-'}</td>
-              <td class="p-4 text-gray-500">${a.default_supplier_name || '-'}</td>
+              <td class="p-4">
+                <select onchange="updateSeAgentSupplier(${a.id}, this.value)" class="border border-gray-200 rounded-lg px-2 py-1 text-xs ${a.default_supplier_id ? 'text-gray-700' : 'text-amber-600 font-bold'}">
+                  <option value="" ${!a.default_supplier_id ? 'selected' : ''}>⚠️ بدون مورد افتراضي</option>
+                  ${seSuppliersCache.map(s => `<option value="${s.id}" ${a.default_supplier_id === s.id ? 'selected' : ''}>${s.name}</option>`).join('')}
+                </select>
+              </td>
               <td class="p-4">${a.conversation_key
                 ? '<span class="text-green-600 text-xs font-bold"><i class="fa-solid fa-circle-check ml-1"></i>مرتبطة</span>'
                 : '<span class="text-amber-600 text-xs font-bold"><i class="fa-solid fa-triangle-exclamation ml-1"></i>غير مرتبطة</span>'}</td>
@@ -2193,6 +2198,16 @@ window.createSeAgent = async function () {
       activation_code: document.getElementById('agent-activation-code').value.trim() || null,
       deactivation_code: document.getElementById('agent-deactivation-code').value.trim() || null
     });
+    await renderSeAgents(document.getElementById('se-sub-body'));
+  } catch (err) {
+    if (guardAuth(err)) return;
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+window.updateSeAgentSupplier = async function (id, supplierId) {
+  try {
+    await axios.put(`${API}/agents/${id}`, { default_supplier_id: supplierId ? Number(supplierId) : null });
     await renderSeAgents(document.getElementById('se-sub-body'));
   } catch (err) {
     if (guardAuth(err)) return;
