@@ -234,6 +234,30 @@ async function tickFollowUp() {
   }
 }
 
+// Fix 2026-10-04 (real production bug, transaction UMR-260002 — summary
+// never reached the supplier's group despite the bot replying "✅ تم
+// الرفع." and the transaction advancing to WAITING_HOSTING): startBridge()
+// is called again via setTimeout on every reconnect (normal/expected with
+// Baileys — sockets drop periodically). Each call used to register a FRESH
+// setInterval(() => pollOutbox(sock), ...) bound to that call's `sock`
+// WITHOUT ever clearing the previous one. After N reconnects there were N
+// pollOutbox intervals running concurrently, several of them still
+// capturing an OLD, already-dead `sock` — calling sock.sendMessage() on a
+// dead socket is exactly what throws Baileys' "Connection Closed" (and
+// sometimes a corrupted-session "Cannot destructure property 'user' of
+// jidDecode(...)"). Production evidence: 104 of 130 group_outbox rows ever
+// created (80%) ended in permanent 'failed', almost all "Connection
+// Closed" — this was the silent, default behavior, not a rare edge case.
+// Fix: track the ONE current interval handle at module scope and clear it
+// before starting a new one, so there is only ever a single live
+// pollOutbox interval, always bound to the CURRENT socket.
+let outboxIntervalHandle = null
+// The platform-wide ticks (message lists / knowledge base / follow-up) are
+// started once per PROCESS lifetime, not once per reconnect — same root
+// cause as above (each reconnect of bridge_number_id===1 was stacking a
+// fresh trio of setIntervals on top of any already running).
+let platformTicksStarted = false
+
 async function startBridge() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
 
@@ -291,8 +315,11 @@ async function startBridge() {
       reportStatus('connected', null, sock.user?.id ? sock.user.id.split(':')[0] : undefined)
       // Start the outbox poller once the socket is actually connected —
       // every number's process polls its OWN filtered queue (see pollOutbox
-      // above), so this is always safe to run on every process.
-      setInterval(() => pollOutbox(sock), OUTBOX_POLL_INTERVAL_MS)
+      // above). Fix 2026-10-04: clear any previous interval FIRST so a
+      // reconnect never leaves an old interval (bound to a now-dead sock)
+      // running alongside the new one — see comment above startBridge().
+      if (outboxIntervalHandle) clearInterval(outboxIntervalHandle)
+      outboxIntervalHandle = setInterval(() => pollOutbox(sock), OUTBOX_POLL_INTERVAL_MS)
 
       // The platform-wide scheduler ticks (message lists, knowledge base,
       // follow-up reminders) are NOT per-number — they operate across the
@@ -302,8 +329,11 @@ async function startBridge() {
       // (duplicate broadcasts, duplicate analysis calls, duplicate
       // reminders). Only the default number (id=1, always the first one
       // configured) drives these; additional numbers (2, 3, ...) only
-      // relay group messages + their own outbox.
-      if (BRIDGE_NUMBER_ID === 1) {
+      // relay group messages + their own outbox. Fix 2026-10-04: guard with
+      // platformTicksStarted so a reconnect of number 1 doesn't stack a
+      // second/third/Nth trio of these intervals on top of the first.
+      if (BRIDGE_NUMBER_ID === 1 && !platformTicksStarted) {
+        platformTicksStarted = true
         setInterval(tickMessageLists, MESSAGE_LIST_TICK_INTERVAL_MS)
         setInterval(tickKnowledgeBase, KNOWLEDGE_BASE_TICK_INTERVAL_MS)
         setInterval(tickFollowUp, FOLLOW_UP_TICK_INTERVAL_MS)

@@ -104,7 +104,23 @@ async function closeTransactionToSupplier(
 
   await transitionTransaction(DB, transactionId, 'SENT_TO_SUPPLIER', null, changedBy)
   const summary = await buildTransactionSummary(DB, transactionId)
-  await deliverToConversation(DB, supplierConversationKey, { kind: 'text', text: summary }).catch(() => {})
+  // Fix 2026-10-04 (real production bug, UMR-260002): this call used to be
+  // `.catch(() => {})` — a group delivery failure (e.g. bridge.js socket
+  // was momentarily down: "Connection Closed") was silently swallowed, yet
+  // the code below still unconditionally advanced the transaction to
+  // WAITING_HOSTING and told the agent "✅ تم الرفع." even though the
+  // supplier's group never actually received anything. Now: the
+  // transaction_id tag lets the outbox ack handler auto-retry (see
+  // webhook.ts MAX_OUTBOX_ATTEMPTS) and, if retries are exhausted, flip the
+  // transaction to NEEDS_REVIEW + warn the agent's own group — instead of
+  // the previous silent total loss. The immediate enqueue itself (ok=true)
+  // only means "accepted into group_outbox", never "the supplier has it
+  // yet" — actual delivery is async and only confirmed by the bridge's ack.
+  const deliverResult = await deliverToConversation(DB, supplierConversationKey, { kind: 'text', text: summary }, undefined, transactionId)
+  if (!deliverResult.ok) {
+    await transitionTransaction(DB, transactionId, 'NEEDS_REVIEW', `فشل إرسال ملخص المعاملة للمورد: ${deliverResult.error || 'خطأ غير معروف'}`, 'system')
+    return `\n\n⚠️ تم تأكيد المعاملة ${tx.transaction_code} لكن تعذّر إرسالها للمورد الآن — سيُعاد المحاولة تلقائياً، وإن استمر العطل سيصلكم تنبيه هنا.`
+  }
 
   // Auto-forward any attachments ("الزمام" PDF/document) the agent sent
   // for this transaction — this is the automated replacement for the
@@ -124,7 +140,7 @@ async function closeTransactionToSupplier(
         await deliverToConversation(DB, supplierConversationKey, {
           kind: 'document', base64, mimeType: att.mime_type || 'application/octet-stream',
           filename: att.filename || 'document', caption: `📎 مرفق معاملة ${tx.transaction_code}`
-        }).catch(() => {})
+        }, undefined, transactionId).catch(() => {})
       } catch {
         // best-effort only — never block closing the transaction on an attachment re-upload failure
       }

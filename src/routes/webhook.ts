@@ -16,6 +16,7 @@ import { logConversationMessage, runDueKnowledgeBaseAnalysis, runKnowledgeBaseAn
 import { handleAgentGroupImage, handleAgentGroupText, handleSupplierGroupImage, handleSupplierGroupText, handleAgentGroupDocument, handleAgentGroupSticker } from '../lib/smartEmployee'
 import { runDueFollowUpTasks } from '../lib/followUp'
 import { checkDuplicatePassportInOperations, checkDuplicateDocumentInTransactionPeople, buildDuplicateWarning } from '../lib/duplicateCheck'
+import { transitionTransaction } from '../lib/transactions'
 
 const SHARED_SESSION_DAYS = 30
 
@@ -1481,6 +1482,16 @@ webhook.get('/bridge/outbox', async (c) => {
   })
 })
 
+// Fix 2026-10-04 (real production bug, transaction UMR-260002): historical
+// data showed 104/130 (80%) of ALL group_outbox rows ever created ended in
+// permanent 'failed' with a single attempt — mostly "Connection Closed"
+// from bridge.js's Baileys socket dropping transiently (see bridge/bridge.js
+// setInterval leak across reconnects). A single failure used to be final
+// and silent. Now a failed delivery goes back to 'pending' for the bridge's
+// next poll, up to this many attempts, before being treated as a real,
+// permanent failure.
+const MAX_OUTBOX_ATTEMPTS = 3
+
 // POST /webhook/bridge/outbox/:id/ack
 // Body: { status: 'delivered' } or { status: 'failed', error }
 webhook.post('/bridge/outbox/:id/ack', async (c) => {
@@ -1498,13 +1509,15 @@ webhook.post('/bridge/outbox/:id/ack', async (c) => {
     return c.json({ error: 'invalid json' }, 400)
   }
 
-  // Look up send_log_id BEFORE updating, so we can propagate the result to
-  // message_list_send_log (Message Lists feature, 2026-08-23) — this is the
-  // ONLY change needed on the shared outbox/ack flow to support that
-  // feature's per-recipient sent/failed tracking, since the bridge already
-  // treats group_outbox.group_jid as an opaque destination JID regardless
-  // of whether it's a group or an individual number.
-  const outboxRow = await DB.prepare('SELECT send_log_id FROM group_outbox WHERE id = ?').bind(id).first<{ send_log_id: number | null }>()
+  // Look up send_log_id + transaction_id BEFORE updating, so we can (a)
+  // propagate the result to message_list_send_log (Message Lists feature,
+  // 2026-08-23) and (b) escalate a permanently-failed Smart Employee
+  // transfer back to the transaction + agent group (fix 2026-10-04) — the
+  // bridge already treats group_outbox.group_jid as an opaque destination
+  // JID regardless of whether it's a group or an individual number, so
+  // neither of these needed any change on the bridge.js side.
+  const outboxRow = await DB.prepare('SELECT send_log_id, attempts, transaction_id FROM group_outbox WHERE id = ?')
+    .bind(id).first<{ send_log_id: number | null; attempts: number; transaction_id: number | null }>()
 
   if (body.status === 'delivered') {
     await DB.prepare(
@@ -1514,11 +1527,43 @@ webhook.post('/bridge/outbox/:id/ack', async (c) => {
       await applyMessageListAck(DB, outboxRow.send_log_id, 'sent')
     }
   } else {
-    await DB.prepare(
-      `UPDATE group_outbox SET status='failed', error=? WHERE id=?`
-    ).bind(body.error || 'unknown error', id).run()
-    if (outboxRow?.send_log_id) {
-      await applyMessageListAck(DB, outboxRow.send_log_id, 'failed', body.error)
+    const attempts = (outboxRow?.attempts ?? 0) + 1
+    if (attempts < MAX_OUTBOX_ATTEMPTS) {
+      // Retry: back to 'pending' so the bridge's next poll (every
+      // OUTBOX_POLL_INTERVAL_MS, default 15s) picks it up again — most
+      // "Connection Closed" failures are a transient socket hiccup that
+      // clears up within one or two retries.
+      await DB.prepare(
+        `UPDATE group_outbox SET status='pending', attempts=?, error=? WHERE id=?`
+      ).bind(attempts, body.error || 'unknown error', id).run()
+    } else {
+      await DB.prepare(
+        `UPDATE group_outbox SET status='failed', attempts=?, error=? WHERE id=?`
+      ).bind(attempts, body.error || 'unknown error', id).run()
+      if (outboxRow?.send_log_id) {
+        await applyMessageListAck(DB, outboxRow.send_log_id, 'failed', body.error)
+      }
+      // Permanently failed AND tied to a Smart Employee transaction: the
+      // transaction's own status (e.g. WAITING_HOSTING) and the agent's
+      // "✅ تم الرفع." reply already claimed success at enqueue time — if
+      // delivery never actually succeeds after retries, that must be
+      // surfaced loudly instead of leaving the transaction silently stuck
+      // with the supplier having received nothing.
+      if (outboxRow?.transaction_id) {
+        const tx = await DB.prepare('SELECT transaction_code, conversation_key, status FROM transactions WHERE id = ?')
+          .bind(outboxRow.transaction_id).first<{ transaction_code: string; conversation_key: string; status: string }>()
+        if (tx && tx.status !== 'NEEDS_REVIEW' && tx.status !== 'CANCELLED' && tx.status !== 'COMPLETED') {
+          await transitionTransaction(
+            DB, outboxRow.transaction_id, 'NEEDS_REVIEW',
+            `فشل تسليم المعاملة للمورد بعد ${attempts} محاولات: ${body.error || 'خطأ غير معروف'}`,
+            'system'
+          )
+          await deliverToConversation(DB, tx.conversation_key, {
+            kind: 'text',
+            text: `⚠️ تعذّر تسليم معاملة ${tx.transaction_code} للمورد بعد عدة محاولات. يرجى التواصل مع إدارة المنصة لإعادة إرسالها.`
+          }).catch(() => {})
+        }
+      }
     }
   }
   return c.json({ ok: true })

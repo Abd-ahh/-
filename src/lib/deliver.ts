@@ -33,7 +33,20 @@ export async function deliverToConversation(
   DB: D1Database,
   conversationKey: string,
   payload: DeliverPayload,
-  apiVersion?: string
+  apiVersion?: string,
+  // Optional link back to the Smart Employee transaction this delivery
+  // belongs to (fix 2026-10-04, real production bug UMR-260002: a group
+  // delivery silently failed — 'Connection Closed' from a stale bridge.js
+  // socket — while closeTransactionToSupplier() had already told the agent
+  // "✅ تم الرفع." and advanced the transaction to WAITING_HOSTING, with
+  // zero visible trace anywhere that the supplier never actually got the
+  // summary). Tagging the outbox row lets /webhook/bridge/outbox/:id/ack
+  // retry automatically, and — if retries are exhausted — flip the
+  // transaction back to NEEDS_REVIEW and warn the AGENT'S group instead of
+  // leaving it silently stuck. Omit for non-transaction deliveries (visa
+  // PDFs, message lists, etc.) — purely additive, no behavior change for
+  // those callers.
+  transactionId?: number
 ): Promise<DeliverResult> {
   const parsed = parseConversationKey(conversationKey)
   if (!parsed) {
@@ -56,13 +69,13 @@ export async function deliverToConversation(
 
       if (payload.kind === 'text') {
         await DB.prepare(
-          `INSERT INTO group_outbox (group_jid, kind, text, bridge_number_id) VALUES (?, 'text', ?, ?)`
-        ).bind(parsed.group_jid, payload.text, bridgeNumberId).run()
+          `INSERT INTO group_outbox (group_jid, kind, text, bridge_number_id, transaction_id) VALUES (?, 'text', ?, ?, ?)`
+        ).bind(parsed.group_jid, payload.text, bridgeNumberId, transactionId ?? null).run()
       } else {
         await DB.prepare(
-          `INSERT INTO group_outbox (group_jid, kind, text, document_base64, document_mime_type, filename, bridge_number_id)
-           VALUES (?, 'document', ?, ?, ?, ?, ?)`
-        ).bind(parsed.group_jid, payload.caption || null, payload.base64, payload.mimeType, payload.filename, bridgeNumberId).run()
+          `INSERT INTO group_outbox (group_jid, kind, text, document_base64, document_mime_type, filename, bridge_number_id, transaction_id)
+           VALUES (?, 'document', ?, ?, ?, ?, ?, ?)`
+        ).bind(parsed.group_jid, payload.caption || null, payload.base64, payload.mimeType, payload.filename, bridgeNumberId, transactionId ?? null).run()
       }
       return { ok: true, channel: 'group' }
     } catch (err: any) {
