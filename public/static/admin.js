@@ -225,7 +225,7 @@ window.openCustomerModal = function () {
         <h3 class="font-bold text-lg mb-4">إضافة عميل جديد</h3>
         <div class="space-y-3">
           <input id="nc-name" placeholder="الاسم الكامل" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
-          <input id="nc-email" type="email" placeholder="البريد الإلكتروني" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <input id="nc-email" type="email" dir="ltr" placeholder="البريد الإلكتروني" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
           <input id="nc-phone" placeholder="رقم الجوال (اختياري)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
           <input id="nc-password" type="text" placeholder="كلمة المرور المبدئية" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
           <hr class="my-1" />
@@ -276,6 +276,20 @@ window.openCustomerDetail = async function (id) {
             <p class="text-gray-500 text-sm">${data.customer.email}</p>
           </div>
           <button onclick="closeModal()" class="text-gray-400 hover:text-gray-700"><i class="fa-solid fa-xmark text-xl"></i></button>
+        </div>
+
+        <div class="mb-5">
+          <h4 class="font-bold text-sm text-gray-700 mb-2">🔐 بيانات دخول العميل (/portal)</h4>
+          <p class="text-xs text-gray-400 mb-2">إذا كان العميل يبلّغ بعدم القدرة على الدخول رغم صحة البيانات ظاهرياً، تحقق من البريد هنا (قد يحتوي محارف غير مرئية ملتصقة من لصق سابق) أو صفّره وأعد كتابته، أو عيّن كلمة مرور جديدة له مباشرة.</p>
+          <div class="space-y-2 bg-gray-50 rounded-xl p-3">
+            <input id="cu-email" type="email" dir="ltr" value="${data.customer.email}" placeholder="البريد الإلكتروني" class="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm" />
+            <div id="cu-email-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2"></div>
+            <button onclick="saveCustomerEmail(${id})" class="w-full bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold py-2 rounded-lg">حفظ البريد</button>
+            <hr class="my-2" />
+            <input id="cu-new-password" type="text" dir="ltr" placeholder="كلمة مرور جديدة (اتركه فارغاً إن لم ترد التغيير)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm" />
+            <div id="cu-password-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2"></div>
+            <button onclick="resetCustomerPassword(${id})" class="w-full bg-amber-500 hover:bg-amber-600 text-white text-sm font-bold py-2 rounded-lg">تعيين كلمة مرور جديدة</button>
+          </div>
         </div>
 
         <div class="mb-5">
@@ -355,6 +369,34 @@ window.openCustomerDetail = async function (id) {
       </div>
     </div>
   `;
+};
+
+window.saveCustomerEmail = async function (customerId) {
+  const email = document.getElementById('cu-email').value;
+  try {
+    await axios.put(`${API}/customers/${customerId}`, { email });
+    closeModal();
+    render();
+  } catch (err) {
+    const el = document.getElementById('cu-email-error');
+    el.textContent = err?.response?.data?.error || 'حدث خطأ';
+    el.classList.remove('hidden');
+  }
+};
+
+window.resetCustomerPassword = async function (customerId) {
+  const password = document.getElementById('cu-new-password').value;
+  if (!password) { alert('اكتب كلمة المرور الجديدة أولاً'); return; }
+  try {
+    await axios.put(`${API}/customers/${customerId}/password`, { password });
+    alert('تم تعيين كلمة المرور الجديدة بنجاح. أرسلها للعميل.');
+    closeModal();
+    render();
+  } catch (err) {
+    const el = document.getElementById('cu-password-error');
+    el.textContent = err?.response?.data?.error || 'حدث خطأ';
+    el.classList.remove('hidden');
+  }
 };
 
 window.saveCustomerCommands = async function (customerId) {

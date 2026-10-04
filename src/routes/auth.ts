@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { setCookie, deleteCookie } from 'hono/cookie'
-import { hashPassword, verifyPassword, signJwt } from '../lib/auth'
+import { hashPassword, verifyPassword, signJwt, normalizeEmail } from '../lib/auth'
 import type { AppEnv } from '../lib/types'
 
 const auth = new Hono<AppEnv>()
@@ -56,7 +56,14 @@ auth.post('/admin/logout', async (c) => {
 // ---------- Customer login ----------
 auth.post('/customer/login', async (c) => {
   const { DB, JWT_SECRET } = c.env
-  const { email, password } = await c.req.json()
+  const { email: rawEmail, password } = await c.req.json()
+  // Fix 2026-10-04: normalize the SAME way admin.ts now normalizes on
+  // write, so a customer pasting their email from, say, a WhatsApp
+  // message (which can carry invisible bidi marks) still matches a
+  // cleanly-stored row — and so this lookup also matches once the
+  // one-off production cleanup (see README) fixes the previously-dirty
+  // rows. See normalizeEmail() in lib/auth.ts for the full writeup.
+  const email = normalizeEmail(rawEmail)
   const customer = await DB.prepare('SELECT * FROM customers WHERE email = ?').bind(email).first<any>()
   if (!customer) return c.json({ error: 'بيانات الدخول غير صحيحة' }, 401)
   if (customer.status !== 'active') return c.json({ error: 'حسابك موقوف حالياً، تواصل مع الدعم' }, 403)

@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { requireAdmin } from '../lib/middleware'
-import { hashPassword } from '../lib/auth'
+import { hashPassword, normalizeEmail } from '../lib/auth'
 import { extractPassportData } from '../lib/gemini'
 import { AVAILABLE_FIELDS, normalizeExtractionFields } from '../lib/fields'
 import { fetchPhoneNumbersForWaba, findMatchingWabaNumber } from '../lib/whatsapp'
@@ -187,8 +187,15 @@ async function checkDuplicateCommand(
 
 admin.post('/customers', async (c) => {
   const { DB } = c.env
-  const { name, email, phone, password, activation_code, deactivation_code } = await c.req.json()
-  if (!name || !email || !password) return c.json({ error: 'الرجاء تعبئة جميع الحقول' }, 400)
+  const { name, email: rawEmail, phone, password, activation_code, deactivation_code } = await c.req.json()
+  if (!name || !rawEmail || !password) return c.json({ error: 'الرجاء تعبئة جميع الحقول' }, 400)
+  // Fix 2026-10-04: strip invisible bidi marks + lowercase BEFORE storing —
+  // see normalizeEmail() in lib/auth.ts for the full real-production-bug
+  // writeup (several existing rows got silently polluted with invisible
+  // characters pasted from an RTL context, permanently locking the
+  // customer out of /portal with a correct-looking email/password).
+  const email = normalizeEmail(rawEmail)
+  if (!email) return c.json({ error: 'البريد الإلكتروني غير صالح' }, 400)
   const existing = await DB.prepare('SELECT id FROM customers WHERE email = ?').bind(email).first()
   if (existing) return c.json({ error: 'البريد الإلكتروني مستخدم بالفعل' }, 400)
 
@@ -221,6 +228,21 @@ admin.put('/customers/:id', async (c) => {
   const name = body.name !== undefined ? body.name : existing.name
   const phone = body.phone !== undefined ? (body.phone || null) : existing.phone
   const status = body.status !== undefined ? body.status : existing.status
+  // Fix 2026-10-04 (real production bug): email was NOT editable here at
+  // all before — the only way to fix a customer's login-blocking email
+  // (e.g. invisible bidi characters pasted from WhatsApp, see
+  // normalizeEmail() in lib/auth.ts) was a raw DB UPDATE. Always goes
+  // through normalizeEmail() so a typo-fix can't reintroduce the same
+  // class of bug, and is checked for collision with another customer.
+  let email = existing.email
+  if (body.email !== undefined) {
+    email = normalizeEmail(body.email)
+    if (!email) return c.json({ error: 'البريد الإلكتروني غير صالح' }, 400)
+    if (email !== existing.email) {
+      const dup = await DB.prepare('SELECT id FROM customers WHERE email = ? AND id != ?').bind(email, id).first()
+      if (dup) return c.json({ error: 'البريد الإلكتروني مستخدم بالفعل من عميل آخر' }, 400)
+    }
+  }
   const reply_language = body.reply_language !== undefined ? (body.reply_language || 'ar') : existing.reply_language
   const welcome_message = body.welcome_message !== undefined ? (body.welcome_message || null) : existing.welcome_message
   const actCode = body.activation_code !== undefined ? (body.activation_code?.trim() || null) : existing.activation_code
@@ -239,14 +261,31 @@ admin.put('/customers/:id', async (c) => {
   }
 
   await DB.prepare(
-    'UPDATE customers SET name=?, phone=?, status=?, reply_language=?, welcome_message=?, activation_code=?, deactivation_code=?, visa_caption_office_label=? WHERE id=?'
-  ).bind(name, phone, status, reply_language, welcome_message, actCode, deactCode, visaOfficeLabel, id).run()
+    'UPDATE customers SET name=?, email=?, phone=?, status=?, reply_language=?, welcome_message=?, activation_code=?, deactivation_code=?, visa_caption_office_label=? WHERE id=?'
+  ).bind(name, email, phone, status, reply_language, welcome_message, actCode, deactCode, visaOfficeLabel, id).run()
   return c.json({ success: true })
 })
 
 admin.delete('/customers/:id', async (c) => {
   const { DB } = c.env
   await DB.prepare('DELETE FROM customers WHERE id = ?').bind(c.req.param('id')).run()
+  return c.json({ success: true })
+})
+
+// Fix 2026-10-04 (real production bug — customer login issues): there was
+// previously NO way for the admin to reset a customer's portal password
+// if they forgot it or the admin wants to hand them a fresh one — only
+// set once at customer creation. Combined with the email-editability fix
+// above, the admin can now fully unblock a customer stuck out of /portal.
+admin.put('/customers/:id/password', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const existing = await DB.prepare('SELECT id FROM customers WHERE id = ?').bind(id).first()
+  if (!existing) return c.json({ error: 'العميل غير موجود' }, 404)
+  const { password } = await c.req.json<{ password?: string }>()
+  if (!password || password.length < 4) return c.json({ error: 'كلمة المرور قصيرة جداً' }, 400)
+  const { hash, salt } = await hashPassword(password)
+  await DB.prepare('UPDATE customers SET password_hash=?, password_salt=? WHERE id=?').bind(hash, salt, id).run()
   return c.json({ success: true })
 })
 

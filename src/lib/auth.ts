@@ -1,5 +1,26 @@
 // Password hashing + JWT helpers using only Web Crypto API (Cloudflare Workers compatible)
 
+// Fix 2026-10-04 (real production bug): several customers.email rows in
+// production contain invisible Unicode bidi control characters (U+200F
+// RIGHT-TO-LEFT MARK, U+202C POP DIRECTIONAL FORMATTING, etc.) — e.g.
+// 'wkaltalryadblas@gmail.com\u202c\u200f'. These get silently pasted in
+// when an admin on an RTL (Arabic) keyboard/browser copies an email from
+// WhatsApp/a contact card into the "إضافة عميل جديد" form, whose email
+// input sits inside a dir="rtl" page with no dir="ltr" override. The
+// customer then types/pastes their REAL email (without the invisible
+// marks) on /portal, and the strict `WHERE email = ?` lookup in
+// auth.ts's /customer/login never matches — login fails with "بيانات
+// الدخول غير صحيحة" even though both the email and password are, from
+// the customer's own point of view, 100% correct. normalizeEmail() strips
+// every bidi/invisible control character plus surrounding whitespace and
+// lowercases the result, applied consistently at BOTH write time (admin
+// creates/updates a customer) and read time (login lookup) so a stray
+// invisible character can never again cause a false "wrong credentials".
+const INVISIBLE_CHARS_RE = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g
+export function normalizeEmail(email: string): string {
+  return (email || '').replace(INVISIBLE_CHARS_RE, '').trim().toLowerCase()
+}
+
 function bufToHex(buf: ArrayBuffer): string {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
