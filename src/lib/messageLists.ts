@@ -13,29 +13,42 @@
 // delivery-logic changes were needed — only the new tick-polling call.
 import type { MessageListRow, MessageContactRow } from './types'
 
-// The platform's user base is Yemen + Saudi Arabia, both fixed UTC+3 with no
-// DST — a constant offset is deliberately used instead of a timezone
-// database to keep this dependency-free inside the Workers runtime.
-const RIYADH_OFFSET_MIN = 3 * 60
+// The platform's original user base was Yemen + Saudi Arabia, both fixed
+// UTC+3 with no DST — a constant offset was used instead of a timezone
+// database to keep this dependency-free inside the Workers runtime. This
+// default is kept for backward compatibility (every list created before
+// migration 0019 defaults to timezone_offset_hours=3, identical behavior).
+const DEFAULT_OFFSET_HOURS = 3
 
-function riyadhNow(): Date {
+// Common fixed UTC offsets for the admin UI's country/timezone picker
+// (migration 0019, "توقيت الرسائل الجماعية حسب البلد"). All are whole-hour,
+// DST-free offsets — matches every country this platform currently serves
+// or is likely to expand into. Kept as a flat list here (used by both
+// admin.js and customer.js dropdowns via GET so it only needs to be
+// maintained in one place).
+export const COUNTRY_TIMEZONE_OPTIONS = [
+  { offset: 3, label_ar: 'اليمن / السعودية / العراق (UTC+3)' },
+  { offset: 4, label_ar: 'الإمارات / عمان (UTC+4)' },
+  { offset: 2, label_ar: 'مصر / الأردن / فلسطين (UTC+2)' },
+  { offset: 1, label_ar: 'ليبيا / تونس / الجزائر (UTC+1)' },
+  { offset: 0, label_ar: 'المغرب (UTC+0)' }
+]
+
+// Returns "now" shifted by the given fixed UTC offset (hours), so the
+// shifted Date's UTC getters (getUTCHours/getUTCDate/getUTCDay/...)
+// directly represent that offset's local wall-clock time.
+function offsetNow(offsetHours: number): Date {
   const utcMs = Date.now()
-  return new Date(utcMs + RIYADH_OFFSET_MIN * 60 * 1000)
+  return new Date(utcMs + offsetHours * 60 * 60 * 1000)
 }
 
-// Formats a Riyadh-shifted Date's UTC getters as 'YYYY-MM-DD' (the shifted
-// Date's UTC fields represent Riyadh-local wall-clock time).
-function riyadhDateKey(d: Date): string {
+// Formats an offset-shifted Date's UTC getters as 'YYYY-MM-DD' (the shifted
+// Date's UTC fields represent that offset's local wall-clock time).
+function offsetDateKey(d: Date): string {
   const y = d.getUTCFullYear()
   const m = String(d.getUTCMonth() + 1).padStart(2, '0')
   const day = String(d.getUTCDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
-}
-
-function riyadhHHMM(d: Date): string {
-  const h = String(d.getUTCHours()).padStart(2, '0')
-  const m = String(d.getUTCMinutes()).padStart(2, '0')
-  return `${h}:${m}`
 }
 
 function parseDaysJson(raw: string | null): number[] {
@@ -53,10 +66,20 @@ function parseDaysJson(raw: string | null): number[] {
 // poll interval) rather than "already past" to avoid re-sending hours later
 // if the tick was briefly down — last_run_date is what actually prevents
 // double-sends within the same day, this just decides day-of eligibility.
-export function isListDue(list: MessageListRow, now: Date = riyadhNow(), toleranceMin = 2): boolean {
+//
+// Per-country timezone (migration 0019): "now" is computed USING THIS
+// LIST'S OWN timezone_offset_hours (default 3 = the original Yemen/Saudi
+// behavior), not a single shared platform-wide instant — two lists with
+// different countries evaluate schedule_time against their own local
+// wall-clock, independently. An explicit `nowOverride` param is kept only
+// for deterministic unit testing (bypasses the per-list offset entirely).
+export function isListDue(list: MessageListRow, toleranceMin = 2, nowOverride?: Date): boolean {
   if (!list.is_active) return false
 
-  const todayKey = riyadhDateKey(now)
+  const offsetHours = Number.isFinite(list.timezone_offset_hours) ? list.timezone_offset_hours : DEFAULT_OFFSET_HOURS
+  const now = nowOverride || offsetNow(offsetHours)
+
+  const todayKey = offsetDateKey(now)
   if (list.last_run_date === todayKey) return false // already fired today
 
   const [schH, schM] = (list.schedule_time || '00:00').split(':').map((n) => parseInt(n, 10))
@@ -72,9 +95,9 @@ export function isListDue(list: MessageListRow, now: Date = riyadhNow(), toleran
 
   if (list.recurrence === 'weekly') {
     const days = parseDaysJson(list.schedule_days)
-    // JS Date.getUTCDay() on our Riyadh-shifted Date gives the Riyadh-local
-    // weekday (0=Sunday..6=Saturday), matching the convention documented in
-    // the migration.
+    // JS Date.getUTCDay() on our offset-shifted Date gives that offset's
+    // local weekday (0=Sunday..6=Saturday), matching the convention
+    // documented in the migration.
     return days.includes(now.getUTCDay())
   }
 
@@ -202,9 +225,6 @@ export async function fireMessageList(DB: D1Database, list: MessageListRow): Pro
 // so the same list doesn't double-fire within the same day across multiple
 // tick polls).
 export async function runDueMessageLists(DB: D1Database): Promise<TickResult> {
-  const now = riyadhNow()
-  const todayKey = riyadhDateKey(now)
-
   const active = await DB.prepare(`SELECT * FROM message_lists WHERE is_active = 1`).all<MessageListRow>()
   const lists = active.results || []
 
@@ -212,7 +232,12 @@ export async function runDueMessageLists(DB: D1Database): Promise<TickResult> {
   let totalQueued = 0
 
   for (const list of lists) {
-    if (!isListDue(list, now)) continue
+    // Per-country timezone (migration 0019): each list's due-check and
+    // last_run_date stamp use ITS OWN offset, not one shared platform-wide
+    // instant — see isListDue's doc comment.
+    if (!isListDue(list)) continue
+    const offsetHours = Number.isFinite(list.timezone_offset_hours) ? list.timezone_offset_hours : DEFAULT_OFFSET_HOURS
+    const todayKey = offsetDateKey(offsetNow(offsetHours))
 
     const { recipients } = await fireMessageList(DB, list)
 
@@ -345,6 +370,10 @@ export interface MessageListInput {
   target_region?: string | null
   is_active?: boolean
   recipient_contact_ids?: number[]
+  // Fixed UTC offset in hours this list's schedule_time is evaluated
+  // against (migration 0019, "توقيت الرسائل الجماعية حسب البلد"). Omitted
+  // = defaults to 3 (Yemen/Saudi), identical to the pre-migration behavior.
+  timezone_offset_hours?: number
 }
 
 export interface MessageListValidationError {
@@ -362,15 +391,25 @@ export function validateMessageListInput(input: any): MessageListValidationError
   return null
 }
 
+// Validates+clamps a requested offset to the supported list (migration
+// 0019) — falls back to the original default (3) for anything missing or
+// not in COUNTRY_TIMEZONE_OPTIONS, so a bad/unexpected value can never
+// silently corrupt a list's schedule evaluation.
+function normalizeTimezoneOffset(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : parseInt(String(raw), 10)
+  return COUNTRY_TIMEZONE_OPTIONS.some((o) => o.offset === n) ? n : DEFAULT_OFFSET_HOURS
+}
+
 export async function createMessageList(DB: D1Database, customerId: number, input: MessageListInput): Promise<number> {
   const scheduleDays = normalizeScheduleDays(input.recurrence, input.schedule_days || [])
+  const tzOffset = normalizeTimezoneOffset(input.timezone_offset_hours)
   const result = await DB.prepare(
-    `INSERT INTO message_lists (customer_id, name, message_type, message_text, schedule_time, recurrence, schedule_days, target_region, is_active)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO message_lists (customer_id, name, message_type, message_text, schedule_time, recurrence, schedule_days, target_region, is_active, timezone_offset_hours)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     customerId, input.name.trim(), input.message_type?.trim() || null, input.message_text.trim(),
     input.schedule_time, input.recurrence, scheduleDays, input.target_region?.trim() || null,
-    input.is_active === false ? 0 : 1
+    input.is_active === false ? 0 : 1, tzOffset
   ).run()
   const listId = result.meta.last_row_id as number
 
@@ -385,13 +424,14 @@ export async function updateMessageList(DB: D1Database, id: number, customerId: 
   if (!existing) return false
 
   const scheduleDays = normalizeScheduleDays(input.recurrence, input.schedule_days || [])
+  const tzOffset = normalizeTimezoneOffset(input.timezone_offset_hours)
   await DB.prepare(
-    `UPDATE message_lists SET name=?, message_type=?, message_text=?, schedule_time=?, recurrence=?, schedule_days=?, target_region=?, is_active=?, updated_at=datetime('now')
+    `UPDATE message_lists SET name=?, message_type=?, message_text=?, schedule_time=?, recurrence=?, schedule_days=?, target_region=?, is_active=?, timezone_offset_hours=?, updated_at=datetime('now')
      WHERE id=?`
   ).bind(
     input.name.trim(), input.message_type?.trim() || null, input.message_text.trim(),
     input.schedule_time, input.recurrence, scheduleDays, input.target_region?.trim() || null,
-    input.is_active === false ? 0 : 1, id
+    input.is_active === false ? 0 : 1, tzOffset, id
   ).run()
 
   if (input.recipient_contact_ids !== undefined) {

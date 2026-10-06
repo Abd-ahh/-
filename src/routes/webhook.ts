@@ -607,7 +607,12 @@ async function handleIncomingMessage(params: {
       try {
         const fullName = extraction.full_name_ar.trim()
         const firstName = fullName.split(/\s+/)[0]
-        const nextCheckAt = new Date(Date.now() + VISA_CHECK_INITIAL_DELAY_MIN * 60 * 1000).toISOString()
+        // Per-office configurable start delay (migration 0019, admin panel).
+        // Falls back to the original 5-minute constant if the column is
+        // somehow null/undefined (shouldn't happen post-migration, but kept
+        // for safety against any stale/partial customer row).
+        const initialDelayMin = Number(customer?.visa_check_initial_delay_min) || VISA_CHECK_INITIAL_DELAY_MIN
+        const nextCheckAt = new Date(Date.now() + initialDelayMin * 60 * 1000).toISOString()
         await DB.prepare(
           `INSERT INTO umrah_visa_checks (operation_id, customer_id, conversation_key, passport_number, first_name, full_name, nationality, next_check_at, extraction_date)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -1209,7 +1214,8 @@ webhook.post('/bridge/message', async (c) => {
       try {
         const fullName = extraction.full_name_ar.trim()
         const firstName = fullName.split(/\s+/)[0]
-        const nextCheckAt = new Date(Date.now() + VISA_CHECK_INITIAL_DELAY_MIN * 60 * 1000).toISOString()
+        const initialDelayMin = Number(customer?.visa_check_initial_delay_min) || VISA_CHECK_INITIAL_DELAY_MIN
+        const nextCheckAt = new Date(Date.now() + initialDelayMin * 60 * 1000).toISOString()
         await DB.prepare(
           `INSERT INTO umrah_visa_checks (operation_id, customer_id, conversation_key, passport_number, first_name, full_name, nationality, next_check_at, extraction_date)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -1717,6 +1723,94 @@ webhook.get('/follow-up/tick', async (c) => {
   }
   const result = await runDueFollowUpTasks(DB)
   return c.json({ ok: true, ...result })
+})
+
+// =====================================================================
+// Group invite-link resolver (migration 0019, requested 2026-10-07) —
+// lets an admin/customer paste a WhatsApp group INVITE LINK
+// (https://chat.whatsapp.com/<code>) instead of the raw technical JID when
+// adding a "group" message-contact.
+//
+// IMPORTANT design note: each bridge.js PM2 process is a SEPARATE
+// WhatsApp number/Baileys socket (see bridge.js's multi-number support
+// doc comment) — unlike the visa-checker/render-jobs queues, there is no
+// single process that holds every number's socket at once. So, unlike
+// render-jobs' exclusive "claim then process" pattern, this queue is
+// NON-EXCLUSIVE: EVERY bridge number's process polls the SAME pending
+// list and tries the invite code against its OWN socket via
+// sock.groupGetInviteInfo(inviteCode) — a read-only call that returns the
+// group's metadata (JID, subject) WITHOUT joining, but only succeeds if
+// that specific number is ALREADY a member of the group. Whichever number
+// succeeds first wins (the result UPDATE is conditioned on
+// status='pending' so a slower second success is a harmless no-op). If no
+// number succeeds within RESOLVE_TIMEOUT_MINUTES, the job is lazily
+// auto-failed the next time anyone polls pending (no cron needed).
+// =====================================================================
+
+const GROUP_RESOLVE_TIMEOUT_MIN = 5
+
+webhook.get('/group-resolve-jobs/pending', async (c) => {
+  const { DB, BRIDGE_SECRET } = c.env
+  if (!BRIDGE_SECRET || c.req.header('x-bridge-secret') !== BRIDGE_SECRET) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+
+  // Lazy timeout sweep: a job still 'pending' after GROUP_RESOLVE_TIMEOUT_MIN
+  // means no registered bridge number recognized the invite code (link
+  // invalid/expired, or none of our numbers are members of that group).
+  await DB.prepare(
+    `UPDATE group_resolve_jobs SET status='failed', error='لم يتعرّف أي رقم جسر مفعّل على هذه المجموعة خلال ${GROUP_RESOLVE_TIMEOUT_MIN} دقائق. تأكد أن أحد أرقام الجسر المفعّلة عضو بالفعل في هذه المجموعة وأن الرابط صحيح.', updated_at=datetime('now')
+     WHERE status='pending' AND created_at <= datetime('now', '-${GROUP_RESOLVE_TIMEOUT_MIN} minutes')`
+  ).run()
+
+  const limit = Math.min(parseInt(c.req.query('limit') || '5', 10) || 5, 20)
+  const due = await DB.prepare(
+    `SELECT id, invite_code FROM group_resolve_jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?`
+  ).bind(limit).all<{ id: number; invite_code: string }>()
+  return c.json({ jobs: due.results || [] })
+})
+
+// POST /webhook/group-resolve-jobs/:id/result
+// Body (success): { status: 'resolved', jid, group_name, bridge_number_id }
+// Body (this number's attempt failed — NOT a final failure, other numbers
+// may still succeed): { status: 'attempt_failed' } — intentionally a no-op
+// write (the job just stays 'pending' until timeout or another number
+// succeeds); only logged for visibility, no DB write needed.
+webhook.post('/group-resolve-jobs/:id/result', async (c) => {
+  const { DB, BRIDGE_SECRET } = c.env
+  if (!BRIDGE_SECRET || c.req.header('x-bridge-secret') !== BRIDGE_SECRET) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const id = parseInt(c.req.param('id'), 10)
+  if (!id) return c.json({ error: 'invalid id' }, 400)
+
+  let body: { status?: string; jid?: string; group_name?: string; bridge_number_id?: number }
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+
+  if (body.status === 'resolved') {
+    if (!body.jid || !body.bridge_number_id) {
+      return c.json({ error: 'jid and bridge_number_id are required when status=resolved' }, 400)
+    }
+    // Conditioned on status='pending': if another bridge number already
+    // won this race (or the timeout sweep above already failed it), this
+    // is a harmless no-op rather than overwriting a settled result.
+    const result = await DB.prepare(
+      `UPDATE group_resolve_jobs SET status='resolved', resolved_jid=?, resolved_group_name=?, resolved_bridge_number_id=?, updated_at=datetime('now')
+       WHERE id=? AND status='pending'`
+    ).bind(body.jid, body.group_name || null, body.bridge_number_id, id).run()
+    return c.json({ ok: true, applied: (result.meta.changes || 0) > 0 })
+  }
+
+  if (body.status === 'attempt_failed') {
+    // Intentionally no DB write — see doc comment above. Just acknowledge.
+    return c.json({ ok: true, applied: false })
+  }
+
+  return c.json({ error: `unrecognized status: ${body.status}` }, 400)
 })
 
 export default webhook

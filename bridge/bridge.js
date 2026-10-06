@@ -234,6 +234,63 @@ async function tickFollowUp() {
   }
 }
 
+// ---- Group invite-link resolver tick (migration 0019, 2026-10-07) ----
+// Every bridge number's process polls the SAME pending-jobs list and tries
+// each invite code against ITS OWN socket via groupGetInviteInfo() — a
+// read-only call (does NOT join the group) that only succeeds if this
+// specific number is already a member. See webhook.ts's
+// /group-resolve-jobs/* handlers for the full non-exclusive-race design
+// rationale (unlike outbox/visa-checks, there's no single process holding
+// every number's socket, so claiming exclusively isn't possible here).
+const GROUP_RESOLVE_TICK_INTERVAL_MS = parseInt(process.env.GROUP_RESOLVE_TICK_INTERVAL_MS || '20000', 10)
+
+async function tickGroupResolveJobs(sock) {
+  try {
+    const resp = await fetch(`${WORKER_URL}/webhook/group-resolve-jobs/pending?limit=5`, {
+      headers: { 'X-Bridge-Secret': BRIDGE_SECRET }
+    })
+    if (!resp.ok) return
+    const data = await resp.json()
+    const jobs = data?.jobs || []
+    if (jobs.length === 0) return
+
+    for (const job of jobs) {
+      try {
+        // groupGetInviteInfo throws if this number isn't a member of the
+        // group the code points to (or the code is invalid/expired) — that
+        // is the EXPECTED outcome for most of our numbers on most jobs,
+        // not a real error, so it's reported as 'attempt_failed' (no-op)
+        // rather than logged loudly.
+        const info = await sock.groupGetInviteInfo(job.invite_code)
+        await fetch(`${WORKER_URL}/webhook/group-resolve-jobs/${job.id}/result`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Bridge-Secret': BRIDGE_SECRET },
+          body: JSON.stringify({
+            status: 'resolved',
+            jid: info.id,
+            group_name: info.subject || null,
+            bridge_number_id: BRIDGE_NUMBER_ID
+          })
+        })
+        logger.info({ jobId: job.id, jid: info.id, bridgeNumberId: BRIDGE_NUMBER_ID }, 'Resolved group invite link')
+      } catch (err) {
+        // Not a member of this group (or bad/expired code) — expected for
+        // most number/job combinations in a multi-number setup. No DB
+        // write; the job stays 'pending' for other numbers to try, and
+        // auto-fails via the Worker's lazy timeout sweep if nobody ever
+        // succeeds.
+        await fetch(`${WORKER_URL}/webhook/group-resolve-jobs/${job.id}/result`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Bridge-Secret': BRIDGE_SECRET },
+          body: JSON.stringify({ status: 'attempt_failed' })
+        }).catch(() => {})
+      }
+    }
+  } catch (err) {
+    logger.error({ err: err?.message }, 'Failed to poll group-resolve-jobs')
+  }
+}
+
 // Fix 2026-10-04 (real production bug, transaction UMR-260002 — summary
 // never reached the supplier's group despite the bot replying "✅ تم
 // الرفع." and the transaction advancing to WAITING_HOSTING): startBridge()
@@ -257,6 +314,13 @@ let outboxIntervalHandle = null
 // cause as above (each reconnect of bridge_number_id===1 was stacking a
 // fresh trio of setIntervals on top of any already running).
 let platformTicksStarted = false
+// Group-resolve-jobs tick (2026-10-07): unlike the platform-wide ticks
+// above, this one runs on EVERY bridge number's process (not just #1),
+// since resolving requires trying the invite code against THIS specific
+// number's own socket — but it still needs the same "clear before
+// restart" guard as outboxIntervalHandle so a reconnect doesn't stack a
+// second interval bound to a now-dead sock on top of the first.
+let groupResolveIntervalHandle = null
 
 async function startBridge() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
@@ -320,6 +384,12 @@ async function startBridge() {
       // running alongside the new one — see comment above startBridge().
       if (outboxIntervalHandle) clearInterval(outboxIntervalHandle)
       outboxIntervalHandle = setInterval(() => pollOutbox(sock), OUTBOX_POLL_INTERVAL_MS)
+
+      // Group-resolve-jobs: runs on every number (see doc comment above
+      // groupResolveIntervalHandle's declaration), always rebound to the
+      // CURRENT sock on every (re)connect, same pattern as outbox above.
+      if (groupResolveIntervalHandle) clearInterval(groupResolveIntervalHandle)
+      groupResolveIntervalHandle = setInterval(() => tickGroupResolveJobs(sock), GROUP_RESOLVE_TICK_INTERVAL_MS)
 
       // The platform-wide scheduler ticks (message lists, knowledge base,
       // follow-up reminders) are NOT per-number — they operate across the

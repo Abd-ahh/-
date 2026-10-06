@@ -10,6 +10,7 @@ import {
   listMessageLists, getMessageListDetail, validateMessageListInput, createMessageList,
   updateMessageList, deleteMessageList
 } from '../lib/messageLists'
+import { createGroupResolveJob, getGroupResolveJob } from '../lib/groupResolve'
 import { listStaffNumbers, addStaffNumber, removeStaffNumber, runKnowledgeBaseAnalysis } from '../lib/knowledgeBase'
 import { buildConversationKey } from '../lib/commands'
 import {
@@ -98,6 +99,58 @@ admin.get('/dashboard', async (c) => {
     operations_failed: opsFailed?.cnt || 0,
     revenue_total: revenue?.total || 0,
     recent_operations: recentOps.results
+  })
+})
+
+// ---------------------- Operations ("نقاط") usage analytics ----------------------
+// "النقاط" in this platform = subscriptions.operations_used /
+// operations_limit (each extracted passport consumes one unit from the
+// office's current active package). This endpoint gives the admin both a
+// platform-wide total and a per-office breakdown in one call, for a new
+// "تحليلات الاستهلاك" dashboard panel.
+admin.get('/analytics/operations-usage', async (c) => {
+  const { DB } = c.env
+
+  // Platform-wide totals across every CURRENTLY active subscription (one
+  // active subscription per office at most, by convention — see the
+  // 'active_subscription_id' subquery used elsewhere in this file).
+  const totals = await DB.prepare(
+    `SELECT
+       COALESCE(SUM(operations_used), 0) as total_used,
+       COALESCE(SUM(operations_limit), 0) as total_limit,
+       COUNT(*) as active_subscriptions_count
+     FROM subscriptions WHERE status = 'active' AND end_date >= datetime('now')`
+  ).first<{ total_used: number; total_limit: number; active_subscriptions_count: number }>()
+
+  // Per-office breakdown: each office's current active subscription (if
+  // any) with its package name, used/limit, and a computed percentage —
+  // offices with no active subscription still appear (used/limit = null)
+  // so the admin can see who has zero active capacity at a glance.
+  const perOffice = await DB.prepare(
+    `SELECT cu.id as customer_id, cu.name as customer_name,
+       s.id as subscription_id, p.name_ar as package_name,
+       s.operations_used, s.operations_limit, s.end_date
+     FROM customers cu
+     LEFT JOIN subscriptions s ON s.customer_id = cu.id AND s.status = 'active' AND s.end_date >= datetime('now')
+     LEFT JOIN packages p ON p.id = s.package_id
+     ORDER BY (s.operations_used * 1.0 / NULLIF(s.operations_limit, 0)) DESC NULLS LAST, cu.name COLLATE NOCASE`
+  ).all<any>()
+
+  return c.json({
+    platform_total_used: totals?.total_used || 0,
+    platform_total_limit: totals?.total_limit || 0,
+    platform_usage_percent: totals?.total_limit ? Math.round((totals.total_used / totals.total_limit) * 1000) / 10 : 0,
+    active_subscriptions_count: totals?.active_subscriptions_count || 0,
+    offices: (perOffice.results || []).map((r: any) => ({
+      customer_id: r.customer_id,
+      customer_name: r.customer_name,
+      has_active_subscription: !!r.subscription_id,
+      package_name: r.package_name || null,
+      operations_used: r.operations_used ?? 0,
+      operations_limit: r.operations_limit ?? 0,
+      usage_percent: r.operations_limit ? Math.round((r.operations_used / r.operations_limit) * 1000) / 10 : 0,
+      subscription_end_date: r.end_date || null
+    }))
   })
 })
 
@@ -316,6 +369,64 @@ admin.put('/customers/:id/visa-check', async (c) => {
   }
 
   return c.json({ success: true, cancelled })
+})
+
+// Per-office configurable visa-check start delay (migration 0019). Was a
+// hardcoded 5-minute constant for every office in webhook.ts; now tunable
+// here so an office that needs a different cadence (e.g. a slower one to
+// go easier on the shared MOFA/Gemini load) doesn't need a code change.
+admin.put('/customers/:id/visa-check-delay', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const existing = await DB.prepare('SELECT id FROM customers WHERE id = ?').bind(id).first()
+  if (!existing) return c.json({ error: 'العميل غير موجود' }, 404)
+
+  const { minutes } = await c.req.json<{ minutes: number }>()
+  const parsed = parseInt(String(minutes), 10)
+  if (!Number.isFinite(parsed) || parsed < 1 || parsed > 1440) {
+    return c.json({ error: 'المهلة يجب أن تكون رقماً بين 1 و1440 دقيقة' }, 400)
+  }
+  await DB.prepare('UPDATE customers SET visa_check_initial_delay_min = ? WHERE id = ?').bind(parsed, id).run()
+  return c.json({ success: true })
+})
+
+// ---------------------- Visa auto-check: manual start-now + per-check stop ----------------------
+// Manual "فحص الآن" — forces a specific pending/checking/failed check to
+// become immediately due (next_check_at = now), instead of waiting for its
+// next scheduled retry. The VPS checker picks it up on its next poll
+// (within POLL_INTERVAL_MS, typically under a minute) exactly like any
+// other due check — no separate code path needed on the VPS side.
+admin.post('/visa-checks/:id/check-now', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const check = await DB.prepare('SELECT id, status FROM umrah_visa_checks WHERE id = ?').bind(id).first<{ id: number; status: string }>()
+  if (!check) return c.json({ error: 'الفحص غير موجود' }, 404)
+  if (!['pending', 'checking', 'failed'].includes(check.status)) {
+    return c.json({ error: 'لا يمكن إعادة فحص عنصر بحالة نهائية (موجودة/ملغاة)' }, 400)
+  }
+  await DB.prepare(
+    `UPDATE umrah_visa_checks SET status='pending', next_check_at=datetime('now'), updated_at=datetime('now') WHERE id=?`
+  ).bind(id).run()
+  return c.json({ success: true })
+})
+
+// Per-check manual stop — cancels ONE specific visa check without touching
+// any other pending check for the same office (unlike the office-wide
+// disable above, which cancels everything). Useful when a single passport
+// turns out to be a mistaken entry or the customer asked to stop tracking
+// just that one.
+admin.post('/visa-checks/:id/stop', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const check = await DB.prepare('SELECT id, status FROM umrah_visa_checks WHERE id = ?').bind(id).first<{ id: number; status: string }>()
+  if (!check) return c.json({ error: 'الفحص غير موجود' }, 404)
+  if (['found', 'cancelled'].includes(check.status)) {
+    return c.json({ error: 'هذا الفحص متوقف بالفعل (موجودة أو ملغاة)' }, 400)
+  }
+  await DB.prepare(
+    `UPDATE umrah_visa_checks SET status='cancelled', last_error='تم الإيقاف يدوياً من قبل الإدارة لهذا الجواز فقط', updated_at=datetime('now') WHERE id=?`
+  ).bind(id).run()
+  return c.json({ success: true })
 })
 
 // ---------------------- Subscriptions ----------------------
@@ -891,6 +1002,31 @@ admin.post('/message-contacts', async (c) => {
   if (!body.name || !body.value) return c.json({ error: 'الاسم والرقم/المعرّف مطلوبان' }, 400)
   const id = await createContact(DB, customerId, body)
   return c.json({ success: true, id })
+})
+
+// Group invite-link resolver (migration 0019) — admin-side: queue a job
+// from a pasted invite link, poll its result, and apply it directly onto a
+// message_contacts row once resolved. See lib/groupResolve.ts and
+// webhook.ts's /group-resolve-jobs/* handlers for the full flow.
+admin.post('/group-resolve-jobs', async (c) => {
+  const { DB } = c.env
+  const body = await c.req.json<{ customer_id?: number; invite_link?: string }>()
+  const customerId = parseInt(String(body.customer_id), 10)
+  if (!customerId) return c.json({ error: 'customer_id مطلوب' }, 400)
+  if (!body.invite_link) return c.json({ error: 'رابط دعوة المجموعة مطلوب' }, 400)
+  const result = await createGroupResolveJob(DB, customerId, body.invite_link)
+  if ('error' in result) return c.json(result, 400)
+  return c.json({ success: true, job_id: result.id })
+})
+
+admin.get('/group-resolve-jobs/:id', async (c) => {
+  const { DB } = c.env
+  const id = parseInt(c.req.param('id'), 10)
+  const customerId = parseInt(c.req.query('customer_id') || '', 10)
+  if (!id || !customerId) return c.json({ error: 'id و customer_id مطلوبان' }, 400)
+  const job = await getGroupResolveJob(DB, id, customerId)
+  if (!job) return c.json({ error: 'غير موجود' }, 404)
+  return c.json({ job })
 })
 
 admin.put('/message-contacts/:id', async (c) => {

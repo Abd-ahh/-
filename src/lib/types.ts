@@ -73,6 +73,11 @@ export interface CustomerRow {
   // as an explicit close signal for the open transaction. Default 0 (off)
   // so no office's behavior changes until an admin opts in.
   se_accept_sticker_as_close: number
+  // Per-office configurable delay (minutes) before the FIRST automatic
+  // MOFA visa check runs after a passport is extracted (migration 0019).
+  // Was a hardcoded 5-minute constant for every office; now tunable from
+  // the same admin panel section as the visa-check enable/disable toggle.
+  visa_check_initial_delay_min: number
   created_at: string
 }
 
@@ -338,6 +343,28 @@ export interface MessageListRow {
   target_region: string | null
   is_active: number
   last_run_date: string | null // 'YYYY-MM-DD' Riyadh-local, last date this list fired
+  // Fixed UTC offset in whole hours this list's schedule_time is evaluated
+  // against (migration 0019). Default 3 = the original Yemen/Saudi-only
+  // behavior; set to e.g. 4 for UAE, 2 for Egypt, etc.
+  timezone_offset_hours: number
+  created_at: string
+  updated_at: string
+}
+
+// ---------------------- Group-invite-link resolver (migration 0019) ----------------------
+// Lets an admin/customer paste a WhatsApp group invite link instead of
+// having to know/paste the raw technical JID. The VPS bridge resolves it
+// (without joining) by checking which of its own already-member bridge
+// numbers recognizes the invite code, via Baileys' groupGetInviteInfo().
+export interface GroupResolveJobRow {
+  id: number
+  customer_id: number
+  invite_code: string
+  status: 'pending' | 'resolved' | 'failed' // see webhook.ts's /group-resolve-jobs/* handlers: non-exclusive, every bridge number races the same pending code
+  resolved_jid: string | null
+  resolved_group_name: string | null
+  resolved_bridge_number_id: number | null
+  error: string | null
   created_at: string
   updated_at: string
 }

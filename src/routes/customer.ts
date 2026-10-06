@@ -9,6 +9,7 @@ import {
   updateMessageList, deleteMessageList
 } from '../lib/messageLists'
 import { listStaffNumbers, addStaffNumber, removeStaffNumber, runKnowledgeBaseAnalysis } from '../lib/knowledgeBase'
+import { createGroupResolveJob, getGroupResolveJob } from '../lib/groupResolve'
 import type { AppEnv } from '../lib/types'
 
 const customer = new Hono<AppEnv>()
@@ -254,6 +255,29 @@ customer.post('/message-contacts', async (c) => {
   if (!body.name || !body.value) return c.json({ error: 'الاسم والرقم/المعرّف مطلوبان' }, 400)
   const contactId = await createContact(DB, id, body)
   return c.json({ success: true, id: contactId })
+})
+
+// Group invite-link resolver (migration 0019) — office self-service
+// equivalent of the admin's /group-resolve-jobs endpoints, hard-scoped to
+// the logged-in office's own customer_id.
+customer.post('/group-resolve-jobs', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const body = await c.req.json<{ invite_link?: string }>()
+  if (!body.invite_link) return c.json({ error: 'رابط دعوة المجموعة مطلوب' }, 400)
+  const result = await createGroupResolveJob(DB, id, body.invite_link)
+  if ('error' in result) return c.json(result, 400)
+  return c.json({ success: true, job_id: result.id })
+})
+
+customer.get('/group-resolve-jobs/:jobId', async (c) => {
+  const { DB } = c.env
+  const id = c.get('customer')!.id
+  const jobId = parseInt(c.req.param('jobId'), 10)
+  if (!jobId) return c.json({ error: 'invalid id' }, 400)
+  const job = await getGroupResolveJob(DB, jobId, id)
+  if (!job) return c.json({ error: 'غير موجود' }, 404)
+  return c.json({ job })
 })
 
 customer.put('/message-contacts/:contactId', async (c) => {
