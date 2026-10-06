@@ -36,6 +36,40 @@ const DEFAULT_WELCOME_MESSAGE = '👋 أهلاً وسهلاً! لتفعيل ال
 const VISA_CHECK_INITIAL_DELAY_MIN = 5
 const VISA_CHECK_RETRY_INTERVAL_MIN = 5
 
+// PROGRESSIVE BACKOFF (added 2026-10-05, capacity/cost fix at scale).
+// Problem: a flat 5-minute retry forever means EVERY pending passport costs
+// ~12 MOFA-site hits + Gemini captcha calls per hour for as long as it
+// stays unissued — for a handful of offices this is fine, but the platform
+// is meant to scale to many offices/thousands of passports, where a flat
+// 5-min interval multiplies directly into an unsustainable request volume
+// against (a) the shared Gemini quota and (b) the external MOFA government
+// website, which WILL rate-limit/block the source IP if hit too
+// aggressively — a risk that threatens the check for every office at once,
+// not just one stuck passport (confirmed real-world precedent: 2026-10-05
+// Gemini-quota exhaustion incident).
+//
+// Fix: keep the fast 5-minute cadence ONLY for the first stretch after a
+// passport is received (when a visa is most likely to appear and
+// near-instant delivery matters most), then progressively widen the gap
+// the longer a passport stays unissued (most likely waiting on a slower
+// government-side process, where hammering every 5 minutes has no
+// marginal benefit). check_count already increments by 1 on every poll
+// (see /visa-checks/pending), so it directly tracks how many attempts a
+// given passport has had.
+//   attempts 1-6   (~0-30 min since first check):  5-minute interval  (unchanged behavior)
+//   attempts 7-18  (~30min-2h):                    15-minute interval
+//   attempts 19-42 (~2h-10h):                       30-minute interval
+//   attempts 43+   (10h+):                          60-minute interval
+// This cuts steady-state request volume for a long-stuck passport by up to
+// 12x (from ~12/hour down to ~1/hour) while keeping the original near-
+// instant responsiveness in the critical first half hour.
+function resolveVisaRetryMinutes(checkCount: number): number {
+  if (checkCount <= 6) return 5
+  if (checkCount <= 18) return 15
+  if (checkCount <= 42) return 30
+  return 60
+}
+
 // Backoff used ONLY when the VPS checker's own circuit breaker reports a
 // Gemini-quota exhaustion (see checker.js tripQuotaBreaker + the
 // "[quota]" error-tag handling below) — NOT the normal per-passport retry
@@ -1337,7 +1371,7 @@ webhook.post('/visa-checks/:id/result', async (c) => {
     if (body.valid_from && check.extraction_date) {
       const validFromKey = parseMofaDateToKey(body.valid_from)
       if (validFromKey && validFromKey < check.extraction_date) {
-        const nextCheckAt = new Date(Date.now() + VISA_CHECK_RETRY_INTERVAL_MIN * 60 * 1000).toISOString()
+        const nextCheckAt = new Date(Date.now() + resolveVisaRetryMinutes(check.check_count) * 60 * 1000).toISOString()
         await DB.prepare(
           `UPDATE umrah_visa_checks SET status='pending', next_check_at=?, last_error=?, updated_at=datetime('now') WHERE id=?`
         ).bind(nextCheckAt, `تأشيرة قديمة التاريخ (${body.valid_from}) أسبق من تاريخ استلام الجواز — أعيدت الجدولة`, id).run()
@@ -1379,7 +1413,7 @@ webhook.post('/visa-checks/:id/result', async (c) => {
     // the same wasteful cadence as soon as the VPS breaker's own 1h window
     // expires independently per-passport.
     const isQuotaFailure = body.status === 'failed' && typeof body.error === 'string' && body.error.startsWith('[quota]')
-    const retryMinutes = isQuotaFailure ? VISA_CHECK_QUOTA_BACKOFF_MIN : VISA_CHECK_RETRY_INTERVAL_MIN
+    const retryMinutes = isQuotaFailure ? VISA_CHECK_QUOTA_BACKOFF_MIN : resolveVisaRetryMinutes(check.check_count)
     const nextCheckAt = new Date(Date.now() + retryMinutes * 60 * 1000).toISOString()
     await DB.prepare(
       `UPDATE umrah_visa_checks SET status='pending', next_check_at=?, last_error=?, updated_at=datetime('now') WHERE id=?`
