@@ -41,6 +41,36 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }
 
+// CIRCUIT BREAKER (added 2026-10-05, root-cause fix for Gemini quota
+// exhaustion). Before this fix, every pending visa check was retried every
+// POLL_INTERVAL_MS regardless of WHY the previous attempt failed — so once
+// the shared Gemini daily free-tier quota (500 req/day) was exhausted, this
+// VPS process kept hammering it with fresh requests every few minutes for
+// the rest of the day, for EVERY pending check in parallel, burning calls
+// against the SAME quota the main Worker uses for actual passport
+// extraction (confirmed: real extraction operations failed with 429 on
+// 2026-10-05 because of this). A single passport stuck for 24h could alone
+// generate thousands of wasted calls (up to 9 Gemini calls per 5-minute
+// cycle before this fix's companion change in gemini-captcha.js reduced
+// that to 3). The breaker trips the MOMENT a quota error is seen and pauses
+// ALL visa-check polling (not just the one passport) for QUOTA_COOLDOWN_MS,
+// since an exhausted daily quota cannot possibly recover in minutes.
+const QUOTA_COOLDOWN_MS = 60 * 60 * 1000 // 1 hour
+let quotaExhaustedUntil = 0
+
+function isQuotaBreakerActive() {
+  return Date.now() < quotaExhaustedUntil
+}
+function tripQuotaBreaker(reason) {
+  quotaExhaustedUntil = Date.now() + QUOTA_COOLDOWN_MS
+  log(`⚠️  CIRCUIT BREAKER TRIPPED (Gemini quota exhausted): ${reason}`)
+  log(`   Pausing ALL visa-check polling for ${QUOTA_COOLDOWN_MS / 60000} minutes to protect the shared Gemini quota.`)
+}
+function isQuotaError(err) {
+  const msg = String(err?.message || err || '')
+  return msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.toLowerCase().includes('quota')
+}
+
 // ROOT CAUSE FIX (confirmed 2026-08-24 by direct reproduction on the live
 // MOFA site): after a wrong-captcha submission, MOFA shows a Bootstrap
 // modal (#dlgMessage, text "رمز الصورة غير صحيح") with a `.modal-backdrop`

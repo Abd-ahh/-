@@ -48,7 +48,16 @@ async function solveCaptcha(apiKey, imageBase64) {
 
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '')
-      const isTransient = resp.status === 503 || resp.status === 429
+      // FIX (2026-10-05): 429 quota-exceeded is NOT a short-lived transient
+      // error like 503 — Google's daily free-tier quota takes HOURS to
+      // reset, not the ~1.2-3.6s this retry loop waits. Retrying it here
+      // just burns 2 more wasted calls against the SAME exhausted quota
+      // shared with the main passport-extraction Worker, for zero chance
+      // of success. Only 503 (genuinely transient service hiccup) still
+      // gets the short retry; 429 fails fast on the first attempt so the
+      // caller (checker.js) can trip its circuit breaker immediately
+      // instead of this function silently tripling the damage per call.
+      const isTransient = resp.status === 503
       lastError = new Error(`Gemini API error (${resp.status}): ${errText}`)
       if (isTransient && attempt < MAX_RETRIES) { await sleep(RETRY_DELAY_MS * (attempt + 1)); continue }
       throw lastError
