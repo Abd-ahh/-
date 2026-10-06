@@ -237,11 +237,24 @@ async function runMofaSearch(browser, { passport_number, first_name, nationality
 }
 
 async function processVisaChecks(browser) {
+  if (isQuotaBreakerActive()) {
+    const remainingMin = Math.ceil((quotaExhaustedUntil - Date.now()) / 60000)
+    log(`visa-checks: skipped (circuit breaker active, ${remainingMin}min remaining) — protecting shared Gemini quota`)
+    return
+  }
+
   const { checks } = await apiGet(`/webhook/visa-checks/pending?limit=${VISA_CHECKS_LIMIT}`)
   if (!checks || checks.length === 0) return
   log(`visa-checks: ${checks.length} due`)
 
   for (const check of checks) {
+    // Re-check the breaker between passports too: a quota error on
+    // passport #1 of a 5-item batch must not let #2-5 still burn calls.
+    if (isQuotaBreakerActive()) {
+      log(`  breaker tripped mid-batch — leaving remaining checks as 'pending' for the next poll after cooldown`)
+      break
+    }
+
     log(`  checking #${check.id} passport=${check.passport_number} name=${check.first_name} nationality=${check.nationality}`)
     const nationality_code = resolveNationality(check.nationality)
     if (!nationality_code) {
@@ -274,6 +287,14 @@ async function processVisaChecks(browser) {
     } catch (err) {
       const msg = String(err?.message || err)
       log(`  #${check.id} -> ERROR: ${msg}`)
+      if (isQuotaError(err)) {
+        tripQuotaBreaker(msg.slice(0, 200))
+        // Report 'failed' with a clear breaker note so the Worker-side
+        // retry delay (see webhook.ts QUOTA 429 handling below) also backs
+        // off instead of rescheduling this specific passport in 5 minutes.
+        await apiPost(`/webhook/visa-checks/${check.id}/result`, { status: 'failed', error: `[quota] ${msg}` }).catch((e) => log('  ! failed to post error result', e.message))
+        break // stop processing the rest of this batch immediately
+      }
       await apiPost(`/webhook/visa-checks/${check.id}/result`, { status: 'failed', error: msg }).catch((e) => log('  ! failed to post error result', e.message))
     }
   }

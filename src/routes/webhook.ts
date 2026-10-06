@@ -36,6 +36,17 @@ const DEFAULT_WELCOME_MESSAGE = '👋 أهلاً وسهلاً! لتفعيل ال
 const VISA_CHECK_INITIAL_DELAY_MIN = 5
 const VISA_CHECK_RETRY_INTERVAL_MIN = 5
 
+// Backoff used ONLY when the VPS checker's own circuit breaker reports a
+// Gemini-quota exhaustion (see checker.js tripQuotaBreaker + the
+// "[quota]" error-tag handling below) — NOT the normal per-passport retry
+// interval above. Added 2026-10-05 after confirming the shared Gemini daily
+// free-tier quota (500 req/day, also used by real passport extraction) was
+// being exhausted by stuck visa checks retrying every 5 minutes with no
+// backoff, which in turn caused real passport-extraction operations to
+// fail with 429 on production the same day. 60 minutes roughly matches the
+// VPS-side breaker's own cooldown window.
+const VISA_CHECK_QUOTA_BACKOFF_MIN = 60
+
 // Riyadh-local (UTC+3, no DST) 'YYYY-MM-DD' date key, used to stamp
 // `umrah_visa_checks.extraction_date` with the day the passport photo was
 // received (see migration 0017) — same fixed-offset approach already used
@@ -1358,7 +1369,18 @@ webhook.post('/visa-checks/:id/result', async (c) => {
   }
 
   if (body.status === 'not_ready' || body.status === 'failed') {
-    const nextCheckAt = new Date(Date.now() + VISA_CHECK_RETRY_INTERVAL_MIN * 60 * 1000).toISOString()
+    // FIX (2026-10-05): the VPS checker tags its error message with a
+    // "[quota]" prefix when it trips its own Gemini-quota circuit breaker
+    // (see checker.js tripQuotaBreaker). Honor that here too with a much
+    // longer reschedule — the normal 5-minute retry interval is meant for
+    // "visa not issued yet / transient site hiccup", not "the shared daily
+    // AI quota is exhausted", which cannot recover in 5 minutes and would
+    // otherwise just re-enter the pending queue and get retried again at
+    // the same wasteful cadence as soon as the VPS breaker's own 1h window
+    // expires independently per-passport.
+    const isQuotaFailure = body.status === 'failed' && typeof body.error === 'string' && body.error.startsWith('[quota]')
+    const retryMinutes = isQuotaFailure ? VISA_CHECK_QUOTA_BACKOFF_MIN : VISA_CHECK_RETRY_INTERVAL_MIN
+    const nextCheckAt = new Date(Date.now() + retryMinutes * 60 * 1000).toISOString()
     await DB.prepare(
       `UPDATE umrah_visa_checks SET status='pending', next_check_at=?, last_error=?, updated_at=datetime('now') WHERE id=?`
     ).bind(nextCheckAt, body.status === 'failed' ? (body.error || 'unknown error') : null, id).run()
