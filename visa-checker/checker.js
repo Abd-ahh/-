@@ -19,18 +19,29 @@ require('dotenv').config({ path: __dirname + '/.env.production' })
 const { chromium } = require('playwright')
 const { resolveNationality } = require('./mofa-nationalities')
 const { solveCaptcha } = require('./gemini-captcha')
+const { GeminiKeyPool } = require('./gemini-key-pool')
 
 const WORKER_URL = (process.env.WORKER_URL || '').replace(/\/$/, '')
 const VISA_CHECKER_SECRET = process.env.VISA_CHECKER_SECRET || ''
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '60000', 10)
 const VISA_CHECKS_LIMIT = parseInt(process.env.VISA_CHECKS_LIMIT || '5', 10)
 const RENDER_JOBS_LIMIT = parseInt(process.env.RENDER_JOBS_LIMIT || '5', 10)
 const MAX_CAPTCHA_ATTEMPTS = 3
 const MOFA_SEARCH_URL = 'https://visa.mofa.gov.sa/visaservices/searchvisa'
 
-if (!WORKER_URL || !VISA_CHECKER_SECRET || !GEMINI_API_KEY) {
-  console.error('[visa-checker] Missing required env vars (WORKER_URL, VISA_CHECKER_SECRET, GEMINI_API_KEY). Check .env.production')
+if (!WORKER_URL || !VISA_CHECKER_SECRET) {
+  console.error('[visa-checker] Missing required env vars (WORKER_URL, VISA_CHECKER_SECRET). Check .env.production')
+  process.exit(1)
+}
+
+// MULTI-KEY POOL (added 2026-10-06, scale-up). See gemini-key-pool.js for
+// full rationale. Throws at startup if GEMINI_API_KEYS/GEMINI_API_KEY is
+// missing or empty, same fail-fast behavior as the old single-key check.
+let geminiPool
+try {
+  geminiPool = new GeminiKeyPool()
+} catch (err) {
+  console.error(`[visa-checker] ${err.message}`)
   process.exit(1)
 }
 
@@ -42,20 +53,24 @@ function sleep(ms) {
 }
 
 // CIRCUIT BREAKER (added 2026-10-05, root-cause fix for Gemini quota
-// exhaustion). Before this fix, every pending visa check was retried every
-// POLL_INTERVAL_MS regardless of WHY the previous attempt failed — so once
-// the shared Gemini daily free-tier quota (500 req/day) was exhausted, this
-// VPS process kept hammering it with fresh requests every few minutes for
-// the rest of the day, for EVERY pending check in parallel, burning calls
+// exhaustion; UPDATED 2026-10-06 for the multi-key pool). Before the
+// original fix, every pending visa check was retried every POLL_INTERVAL_MS
+// regardless of WHY the previous attempt failed — so once the shared
+// Gemini daily free-tier quota (500 req/day) was exhausted, this VPS
+// process kept hammering it with fresh requests every few minutes for the
+// rest of the day, for EVERY pending check in parallel, burning calls
 // against the SAME quota the main Worker uses for actual passport
 // extraction (confirmed: real extraction operations failed with 429 on
-// 2026-10-05 because of this). A single passport stuck for 24h could alone
-// generate thousands of wasted calls (up to 9 Gemini calls per 5-minute
-// cycle before this fix's companion change in gemini-captcha.js reduced
-// that to 3). The breaker trips the MOMENT a quota error is seen and pauses
-// ALL visa-check polling (not just the one passport) for QUOTA_COOLDOWN_MS,
-// since an exhausted daily quota cannot possibly recover in minutes.
-const QUOTA_COOLDOWN_MS = 60 * 60 * 1000 // 1 hour
+// 2026-10-05 because of this).
+//
+// With a SINGLE key, the breaker used to trip on the very first 429. Now
+// that we have a POOL of keys (see gemini-key-pool.js), a single key's 429
+// just marks that one key exhausted and rotates to the next key — the
+// full-pause breaker only trips when geminiPool.allExhausted() is true,
+// i.e. every key in the pool is simultaneously in cooldown. This preserves
+// the original safety guarantee (never hammer an exhausted quota) while
+// letting the other N-1 keys keep working.
+const QUOTA_COOLDOWN_MS = 60 * 60 * 1000 // 1 hour (re-check interval once the whole pool is down)
 let quotaExhaustedUntil = 0
 
 function isQuotaBreakerActive() {
@@ -63,7 +78,7 @@ function isQuotaBreakerActive() {
 }
 function tripQuotaBreaker(reason) {
   quotaExhaustedUntil = Date.now() + QUOTA_COOLDOWN_MS
-  log(`⚠️  CIRCUIT BREAKER TRIPPED (Gemini quota exhausted): ${reason}`)
+  log(`⚠️  CIRCUIT BREAKER TRIPPED (ALL ${geminiPool.size()} Gemini keys exhausted): ${reason}`)
   log(`   Pausing ALL visa-check polling for ${QUOTA_COOLDOWN_MS / 60000} minutes to protect the shared Gemini quota.`)
 }
 function isQuotaError(err) {
@@ -181,7 +196,35 @@ async function runMofaSearch(browser, { passport_number, first_name, nationality
       const captchaEl = await page.$('#imgCaptcha')
       if (!captchaEl) throw new Error('لم يتم العثور على عنصر الكابتشا في الصفحة')
       const captchaBuf = await captchaEl.screenshot()
-      const answer = await solveCaptcha(GEMINI_API_KEY, captchaBuf.toString('base64'))
+      // MULTI-KEY ROTATION (2026-10-06): try each available key in the pool
+      // in turn. A 429/quota error on one key marks it exhausted and moves
+      // to the next one immediately — the batch only fails with a quota
+      // error (which can trip the full breaker) once EVERY key has been
+      // tried and exhausted for this single captcha image.
+      const base64Image = captchaBuf.toString('base64')
+      let answer = null
+      let lastKeyError = null
+      const triesAllowed = geminiPool.size()
+      for (let keyTry = 0; keyTry < triesAllowed; keyTry++) {
+        const key = geminiPool.nextKey()
+        if (!key) break // every key currently in cooldown
+        try {
+          answer = await solveCaptcha(key, base64Image)
+          break
+        } catch (err) {
+          lastKeyError = err
+          if (isQuotaError(err)) {
+            geminiPool.markExhausted(key)
+            log(`  ! Gemini key ${geminiPool.maskKey(key)} exhausted (quota), rotating to next key (${geminiPool.availableCount()}/${geminiPool.size()} still available)`)
+            continue
+          }
+          throw err // non-quota error (network/parse/etc.) — don't mask it by rotating
+        }
+      }
+      if (answer === null) {
+        // Every key in the pool was exhausted for this captcha attempt.
+        throw lastKeyError || new Error('جميع مفاتيح Gemini مستنفدة حالياً (quota)')
+      }
       log(`  captcha attempt ${attempt}/${MAX_CAPTCHA_ATTEMPTS}: "${answer}"`)
 
       await page.fill('#Captcha', answer)
@@ -288,12 +331,27 @@ async function processVisaChecks(browser) {
       const msg = String(err?.message || err)
       log(`  #${check.id} -> ERROR: ${msg}`)
       if (isQuotaError(err)) {
-        tripQuotaBreaker(msg.slice(0, 200))
-        // Report 'failed' with a clear breaker note so the Worker-side
-        // retry delay (see webhook.ts QUOTA 429 handling below) also backs
-        // off instead of rescheduling this specific passport in 5 minutes.
-        await apiPost(`/webhook/visa-checks/${check.id}/result`, { status: 'failed', error: `[quota] ${msg}` }).catch((e) => log('  ! failed to post error result', e.message))
-        break // stop processing the rest of this batch immediately
+        // By the time a quota error bubbles up this far, runMofaSearch
+        // already rotated through and exhausted EVERY key in the pool for
+        // this single captcha (see the rotation loop above) — so
+        // geminiPool.allExhausted() should be true here. Trip the full
+        // breaker only in that case; if somehow a key or two is still
+        // available (race with cooldown expiry), just report this one
+        // check as failed and let the next poll cycle retry normally
+        // without pausing everything.
+        if (geminiPool.allExhausted()) {
+          tripQuotaBreaker(msg.slice(0, 200))
+          // Report 'failed' with a clear breaker note so the Worker-side
+          // retry delay (see webhook.ts QUOTA 429 handling below) also
+          // backs off instead of rescheduling this specific passport in 5
+          // minutes.
+          await apiPost(`/webhook/visa-checks/${check.id}/result`, { status: 'failed', error: `[quota] ${msg}` }).catch((e) => log('  ! failed to post error result', e.message))
+          break // stop processing the rest of this batch immediately
+        } else {
+          log(`  ! quota error but pool not fully exhausted (${geminiPool.availableCount()}/${geminiPool.size()} available) — not tripping breaker`)
+          await apiPost(`/webhook/visa-checks/${check.id}/result`, { status: 'failed', error: msg }).catch((e) => log('  ! failed to post error result', e.message))
+        }
+        continue
       }
       await apiPost(`/webhook/visa-checks/${check.id}/result`, { status: 'failed', error: msg }).catch((e) => log('  ! failed to post error result', e.message))
     }
@@ -326,7 +384,7 @@ async function processRenderJobs(browser) {
 }
 
 async function mainLoop() {
-  log(`visa-checker starting. WORKER_URL=${WORKER_URL} poll interval=${POLL_INTERVAL_MS}ms`)
+  log(`visa-checker starting. WORKER_URL=${WORKER_URL} poll interval=${POLL_INTERVAL_MS}ms Gemini keys in pool=${geminiPool.size()}`)
   const browser = await chromium.launch({ headless: true })
   log('Chromium launched.')
 
