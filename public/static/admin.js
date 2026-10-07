@@ -93,7 +93,7 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
 
 const titles = {
   overview: 'نظرة عامة', customers: 'العملاء', packages: 'الباقات',
-  numbers: 'أرقام واتساب', groups: 'مجموعات واتساب', bridgenumbers: 'أرقام الجسر', messagelists: 'قوائم الرسائل', operations: 'سجل العمليات', test: 'اختبار الاستخراج',
+  numbers: 'أرقام واتساب', groups: 'مجموعات واتساب', bridgenumbers: 'أرقام الجسر', messagelists: 'قوائم الرسائل', operations: 'سجل العمليات', opsanalytics: 'تحليلات الاستهلاك', test: 'اختبار الاستخراج',
   welcome: 'رسالة الترحيب', suggestions: 'صندوق المقترحات', visachecks: 'فحوصات التأشيرات', activation: 'أوامر التفعيل',
   knowledgebase: 'قاعدة المعرفة', smartemployee: 'المعاملات والوكلاء'
 };
@@ -120,6 +120,7 @@ async function render() {
     else if (currentTab === 'bridgenumbers') await renderBridgeNumbers(area);
     else if (currentTab === 'messagelists') await renderMessageLists(area);
     else if (currentTab === 'operations') await renderOperations(area);
+    else if (currentTab === 'opsanalytics') await renderOperationsAnalytics(area);
     else if (currentTab === 'welcome') await renderWelcome(area);
     else if (currentTab === 'suggestions') await renderSuggestions(area);
     else if (currentTab === 'visachecks') await renderVisaChecks(area);
@@ -332,6 +333,14 @@ window.openCustomerDetail = async function (id) {
             <div id="cu-visa-label-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2"></div>
             <button onclick="saveVisaOfficeLabel(${id})" class="w-full bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold py-2 rounded-lg">حفظ تسمية المكتب</button>
           </div>
+          <div class="mt-3 space-y-2">
+            <p class="text-xs text-gray-400">مهلة بدء أول فحص تلقائي بعد رفع الجواز (دقائق). الافتراضي 5 دقائق.</p>
+            <div class="flex gap-2">
+              <input id="cu-visa-delay" type="number" min="1" max="1440" value="${data.customer.visa_check_initial_delay_min ?? 5}" class="flex-1 border border-gray-200 rounded-xl px-4 py-2.5 text-sm" />
+              <button onclick="saveVisaCheckDelay(${id})" class="bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold px-4 rounded-lg">حفظ</button>
+            </div>
+            <div id="cu-visa-delay-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2"></div>
+          </div>
         </div>
 
         <div class="mb-5">
@@ -423,6 +432,19 @@ window.saveVisaOfficeLabel = async function (customerId) {
     const el = document.getElementById('cu-visa-label-error');
     el.textContent = err?.response?.data?.error || 'حدث خطأ';
     el.classList.remove('hidden');
+  }
+};
+
+window.saveVisaCheckDelay = async function (customerId) {
+  const minutes = Number(document.getElementById('cu-visa-delay').value);
+  const errEl = document.getElementById('cu-visa-delay-error');
+  errEl.classList.add('hidden');
+  try {
+    await axios.put(`${API}/customers/${customerId}/visa-check-delay`, { minutes });
+    openCustomerDetail(customerId);
+  } catch (err) {
+    errEl.textContent = err?.response?.data?.error || 'حدث خطأ';
+    errEl.classList.remove('hidden');
   }
 };
 
@@ -879,7 +901,7 @@ async function renderMessageListsBody() {
             <div class="bg-gray-50 rounded-lg p-3 text-sm">
               <div class="flex items-center justify-between">
                 <p class="font-semibold">${l.name} ${l.is_active ? '' : '<span class=\"text-[10px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded-full mr-1\">متوقفة</span>'}</p>
-                <span class="text-xs text-gray-400">${l.schedule_time} — ${recurrenceLabel(l.recurrence)}</span>
+                <span class="text-xs text-gray-400">${l.schedule_time} (UTC+${l.timezone_offset_hours ?? 3}) — ${recurrenceLabel(l.recurrence)}</span>
               </div>
               <p class="text-xs text-gray-500 mt-1 line-clamp-2">${(l.message_text || '').slice(0, 80)}</p>
               <div class="flex items-center justify-between mt-2">
@@ -897,6 +919,18 @@ async function renderMessageListsBody() {
     <div id="modal-root"></div>
   `;
 }
+
+// Mirrors src/lib/messageLists.ts's COUNTRY_TIMEZONE_OPTIONS (migration
+// 0019) — kept as a small static list here rather than fetched over the
+// network since it almost never changes and avoids an extra round-trip
+// every time the list modal opens.
+const COUNTRY_TIMEZONE_OPTIONS = [
+  { offset: 3, label_ar: 'اليمن / السعودية / العراق (UTC+3)' },
+  { offset: 4, label_ar: 'الإمارات / عمان (UTC+4)' },
+  { offset: 2, label_ar: 'مصر / الأردن / فلسطين (UTC+2)' },
+  { offset: 1, label_ar: 'ليبيا / تونس / الجزائر (UTC+1)' },
+  { offset: 0, label_ar: 'المغرب (UTC+0)' }
+];
 
 function recurrenceLabel(r) {
   return r === 'daily' ? 'يومي' : r === 'weekly' ? 'أسبوعي' : r === 'monthly' ? 'شهري' : r;
@@ -927,11 +961,19 @@ window.openMlContactModal = async function (id) {
         <h3 class="font-bold text-lg mb-4">${ct ? 'تعديل جهة اتصال' : 'جهة اتصال جديدة'}</h3>
         <div class="space-y-3">
           <input id="mc-name" value="${ct ? ct.name : ''}" placeholder="الاسم (ممثال: وكيل صنعاء - أحمد)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
-          <select id="mc-channel" class="w-full border border-gray-200 rounded-xl px-4 py-2.5">
+          <select id="mc-channel" onchange="document.getElementById('mc-group-resolve-box').classList.toggle('hidden', this.value !== 'group')" class="w-full border border-gray-200 rounded-xl px-4 py-2.5">
             <option value="number" ${!ct || ct.channel === 'number' ? 'selected' : ''}>رقم واتساب فردي</option>
             <option value="group" ${ct && ct.channel === 'group' ? 'selected' : ''}>مجموعة واتساب (JID)</option>
           </select>
           <input id="mc-value" value="${ct ? ct.value : ''}" dir="ltr" placeholder="رقم الهاتف (967778260004) أو JID المجموعة" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <div id="mc-group-resolve-box" class="${!ct || ct.channel === 'group' ? '' : 'hidden'} bg-gray-50 rounded-xl p-3 space-y-2">
+            <p class="text-xs text-gray-500">بدلاً من كتابة JID المجموعة يدوياً، الصق رابط دعوة المجموعة هنا وسيتم التعرّف على المعرّف تلقائياً (يتطلب أن يكون أحد أرقام الجسر المفعّلة عضواً بالفعل في المجموعة):</p>
+            <div class="flex gap-2">
+              <input id="mc-invite-link" dir="ltr" placeholder="https://chat.whatsapp.com/XXXXXXXXXX" class="flex-1 border border-gray-200 rounded-xl px-3 py-2 text-sm" />
+              <button type="button" onclick="resolveGroupInviteLink()" class="bg-gray-700 hover:bg-gray-800 text-white text-xs font-bold px-3 rounded-lg whitespace-nowrap">تعرّف</button>
+            </div>
+            <div id="mc-resolve-status" class="text-xs"></div>
+          </div>
           <input id="mc-region" value="${ct && ct.region ? ct.region : ''}" placeholder="المنطقة (اختياري، ممثال: صنعاء)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
           <div>
             <label class="text-xs text-gray-500 block mb-1">رقم الجسر المسلّم (للرقم الفردي فقط)</label>
@@ -947,6 +989,56 @@ window.openMlContactModal = async function (id) {
     </div>
   `;
 };
+
+// Group invite-link → JID resolver (migration 0019). Queues a job, then
+// polls it every 2s for up to ~40s. On success, auto-fills mc-value with
+// the resolved JID (and mc-name with the group's subject if the admin
+// hasn't typed a name yet) so the admin never has to copy/paste the JID
+// manually. Only succeeds if an already-activated bridge number is already
+// a member of the group — no joining is ever attempted.
+window.resolveGroupInviteLink = async function () {
+  const link = document.getElementById('mc-invite-link').value.trim();
+  const statusEl = document.getElementById('mc-resolve-status');
+  if (!link) { statusEl.innerHTML = '<span class="text-red-500">الصق رابط دعوة المجموعة أولاً</span>'; return; }
+  statusEl.innerHTML = '<span class="text-gray-500"><i class="fa-solid fa-spinner fa-spin"></i> جاري إرسال الطلب...</span>';
+  try {
+    const { data } = await axios.post(`${API}/group-resolve-jobs`, { customer_id: mlCustomerId, invite_link: link });
+    pollGroupResolveJob(data.job_id, 0);
+  } catch (err) {
+    statusEl.innerHTML = `<span class="text-red-500">${err?.response?.data?.error || 'حدث خطأ'}</span>`;
+  }
+};
+
+function pollGroupResolveJob(jobId, attempt) {
+  const statusEl = document.getElementById('mc-resolve-status');
+  if (!statusEl) return; // modal closed meanwhile
+  if (attempt > 20) {
+    statusEl.innerHTML = '<span class="text-red-500">انتهت مهلة الانتظار. تأكد من أن أحد أرقام الجسر المفعّلة عضو في المجموعة ثم حاول مجدداً.</span>';
+    return;
+  }
+  statusEl.innerHTML = `<span class="text-gray-500"><i class="fa-solid fa-spinner fa-spin"></i> جاري التعرّف على المجموعة... (${attempt + 1})</span>`;
+  setTimeout(async () => {
+    try {
+      const { data } = await axios.get(`${API}/group-resolve-jobs/${jobId}`, { params: { customer_id: mlCustomerId } });
+      const job = data.job;
+      const statusEl2 = document.getElementById('mc-resolve-status');
+      if (!statusEl2) return;
+      if (job.status === 'resolved') {
+        document.getElementById('mc-value').value = job.resolved_jid;
+        const nameEl = document.getElementById('mc-name');
+        if (nameEl && !nameEl.value.trim() && job.resolved_group_name) nameEl.value = job.resolved_group_name;
+        statusEl2.innerHTML = `<span class="text-emerald-600"><i class="fa-solid fa-check"></i> تم التعرّف على المجموعة: ${job.resolved_group_name || ''}</span>`;
+      } else if (job.status === 'failed') {
+        statusEl2.innerHTML = `<span class="text-red-500">${job.error || 'تعذّر التعرّف على المجموعة'}</span>`;
+      } else {
+        pollGroupResolveJob(jobId, attempt + 1);
+      }
+    } catch (err) {
+      const statusEl3 = document.getElementById('mc-resolve-status');
+      if (statusEl3) statusEl3.innerHTML = `<span class="text-red-500">${err?.response?.data?.error || 'حدث خطأ'}</span>`;
+    }
+  }, 2000);
+}
 
 window.submitMlContact = async function (id) {
   const payload = {
@@ -984,7 +1076,7 @@ window.openMlListModal = async function (id) {
     list = data.list;
     recipientIds = (data.recipients || []).map(r => r.id);
   }
-  const l = list || { name: '', message_type: '', message_text: '', schedule_time: '19:00', recurrence: 'daily', schedule_days: null, target_region: '', is_active: 1 };
+  const l = list || { name: '', message_type: '', message_text: '', schedule_time: '19:00', recurrence: 'daily', schedule_days: null, target_region: '', is_active: 1, timezone_offset_hours: 3 };
   let days = [];
   try { days = l.schedule_days ? JSON.parse(l.schedule_days) : []; } catch { days = []; }
 
@@ -1005,6 +1097,12 @@ window.openMlListModal = async function (id) {
               <option value="daily" ${l.recurrence === 'daily' ? 'selected' : ''}>يومي</option>
               <option value="weekly" ${l.recurrence === 'weekly' ? 'selected' : ''}>أسبوعي</option>
               <option value="monthly" ${l.recurrence === 'monthly' ? 'selected' : ''}>شهري</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-xs text-gray-500 block mb-1">توقيت القائمة (حسب البلد المستهدف)</label>
+            <select id="ml-timezone" class="w-full border border-gray-200 rounded-xl px-4 py-2.5">
+              ${COUNTRY_TIMEZONE_OPTIONS.map(o => `<option value="${o.offset}" ${Number(l.timezone_offset_hours ?? 3) === o.offset ? 'selected' : ''}>${o.label_ar}</option>`).join('')}
             </select>
           </div>
           <div id="ml-days-box">
@@ -1061,6 +1159,7 @@ window.submitMlList = async function (id) {
     schedule_time: document.getElementById('ml-time').value,
     recurrence,
     schedule_days,
+    timezone_offset_hours: Number(document.getElementById('ml-timezone').value),
     target_region: document.getElementById('ml-region').value.trim() || null,
     is_active: document.getElementById('ml-active').checked,
     recipient_contact_ids
@@ -1435,6 +1534,64 @@ async function renderOperations(area) {
   `;
 }
 
+// ---------------- Operations ("نقاط") usage analytics ----------------
+// "النقاط" في هذه المنصة = نظام العمليات/الاشتراكات الموجود مسبقاً
+// (subscriptions.operations_used / operations_limit). كل عملية استخراج جواز
+// ناجحة تستهلك نقطة واحدة من باقة المكتب الحالية.
+function usageBarColor(pct) {
+  if (pct >= 90) return 'bg-red-500';
+  if (pct >= 70) return 'bg-amber-500';
+  return 'bg-emerald-500';
+}
+
+async function renderOperationsAnalytics(area) {
+  const { data } = await axios.get(`${API}/analytics/operations-usage`);
+  area.innerHTML = `
+    <div class="grid md:grid-cols-3 gap-4 mb-6">
+      <div class="bg-white rounded-2xl border border-gray-100 p-5">
+        <p class="text-xs text-gray-400 mb-1">إجمالي النقاط المستخدمة (كل المكاتب)</p>
+        <p class="text-2xl font-bold text-gray-900">${data.platform_total_used.toLocaleString()}</p>
+      </div>
+      <div class="bg-white rounded-2xl border border-gray-100 p-5">
+        <p class="text-xs text-gray-400 mb-1">إجمالي النقاط المتاحة (كل المكاتب)</p>
+        <p class="text-2xl font-bold text-gray-900">${data.platform_total_limit.toLocaleString()}</p>
+      </div>
+      <div class="bg-white rounded-2xl border border-gray-100 p-5">
+        <p class="text-xs text-gray-400 mb-1">نسبة الاستهلاك العامة</p>
+        <p class="text-2xl font-bold ${data.platform_usage_percent >= 90 ? 'text-red-600' : 'text-gray-900'}">${data.platform_usage_percent}%</p>
+        <div class="w-full bg-gray-100 rounded-full h-2 mt-2">
+          <div class="${usageBarColor(data.platform_usage_percent)} h-2 rounded-full" style="width:${Math.min(data.platform_usage_percent, 100)}%"></div>
+        </div>
+      </div>
+    </div>
+    <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
+          <th class="p-4 font-medium">المكتب</th><th class="p-4 font-medium">الباقة الحالية</th>
+          <th class="p-4 font-medium">المستخدم / المتاح</th><th class="p-4 font-medium">نسبة الاستهلاك</th>
+          <th class="p-4 font-medium">ينتهي الاشتراك</th>
+        </tr></thead>
+        <tbody>
+          ${data.offices.map(o => `
+            <tr class="border-b border-gray-50">
+              <td class="p-4 font-semibold">${o.customer_name}</td>
+              <td class="p-4 text-gray-500">${o.has_active_subscription ? o.package_name : '<span class="text-red-500">لا يوجد اشتراك فعّال</span>'}</td>
+              <td class="p-4 text-gray-600">${o.has_active_subscription ? `${o.operations_used.toLocaleString()} / ${o.operations_limit.toLocaleString()}` : '-'}</td>
+              <td class="p-4">
+                ${o.has_active_subscription ? `
+                  <div class="flex items-center gap-2">
+                    <div class="w-24 bg-gray-100 rounded-full h-2"><div class="${usageBarColor(o.usage_percent)} h-2 rounded-full" style="width:${Math.min(o.usage_percent, 100)}%"></div></div>
+                    <span class="text-xs text-gray-500">${o.usage_percent}%</span>
+                  </div>` : '-'}
+              </td>
+              <td class="p-4 text-gray-400 text-xs">${o.subscription_end_date ? fmtDate(o.subscription_end_date) : '-'}</td>
+            </tr>`).join('') || '<tr><td colspan="5" class="p-8 text-center text-gray-400">لا توجد مكاتب بعد</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
 // ---------------- Test Extraction Tool ----------------
 async function renderTest(area) {
   area.innerHTML = `
@@ -1588,23 +1745,32 @@ window.updateSuggestionStatus = async function (id, status) {
 
 // ---------------- Feature 4: Umrah visa-check monitor ----------------
 let visaChecksFilter = '';
+let visaChecksCache = [];
+
 async function renderVisaChecks(area) {
   const { data } = await axios.get(`${API}/visa-checks`, { params: visaChecksFilter ? { status: visaChecksFilter } : {} });
   const items = data.checks;
+  visaChecksCache = items;
   area.innerHTML = `
-    <div class="flex items-center gap-2 mb-5 flex-wrap">
-      ${['', 'pending', 'checking', 'found', 'failed', 'cancelled'].map(s => `
-        <button onclick="filterVisaChecks('${s}')" class="px-4 py-2 rounded-xl text-sm font-bold ${visaChecksFilter === s ? 'bg-brand-600 text-white' : 'bg-white border border-gray-200 text-gray-600'}">
-          ${s === '' ? 'الكل' : statusBadge(s).replace(/<[^>]+>/g, '')}
-        </button>`).join('')}
+    <div class="flex items-center justify-between mb-5 flex-wrap gap-3">
+      <div class="flex items-center gap-2 flex-wrap">
+        ${['', 'pending', 'checking', 'found', 'failed', 'cancelled'].map(s => `
+          <button onclick="filterVisaChecks('${s}')" class="px-4 py-2 rounded-xl text-sm font-bold ${visaChecksFilter === s ? 'bg-brand-600 text-white' : 'bg-white border border-gray-200 text-gray-600'}">
+            ${s === '' ? 'الكل' : statusBadge(s).replace(/<[^>]+>/g, '')}
+          </button>`).join('')}
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="printVisaChecks()" class="bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 text-sm font-bold px-4 py-2 rounded-xl"><i class="fa-solid fa-print ml-1"></i> طباعة</button>
+        <button onclick="exportVisaChecksCsv()" class="bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 text-sm font-bold px-4 py-2 rounded-xl"><i class="fa-solid fa-file-csv ml-1"></i> تصدير CSV</button>
+      </div>
     </div>
     <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden">
-      <table class="w-full text-sm">
+      <table id="visa-checks-table" class="w-full text-sm">
         <thead><tr class="text-right text-gray-400 bg-gray-50 border-b border-gray-100">
           <th class="p-4 font-medium">المكتب</th><th class="p-4 font-medium">الاسم</th>
           <th class="p-4 font-medium">رقم الجواز</th><th class="p-4 font-medium">الحالة</th>
           <th class="p-4 font-medium">عدد المحاولات</th><th class="p-4 font-medium">آخر فحص</th>
-          <th class="p-4 font-medium">الفحص القادم</th>
+          <th class="p-4 font-medium">الفحص القادم</th><th class="p-4 font-medium print:hidden">إجراءات</th>
         </tr></thead>
         <tbody>
           ${items.map(v => `
@@ -1616,7 +1782,11 @@ async function renderVisaChecks(area) {
               <td class="p-4 text-gray-500">${v.check_count}</td>
               <td class="p-4 text-gray-400 text-xs">${fmtDate(v.last_checked_at)}</td>
               <td class="p-4 text-gray-400 text-xs">${v.status === 'pending' || v.status === 'checking' ? fmtDate(v.next_check_at) : '-'}</td>
-            </tr>`).join('') || '<tr><td colspan="7" class="p-8 text-center text-gray-400">لا توجد فحوصات بعد</td></tr>'}
+              <td class="p-4 print:hidden">
+                ${['pending', 'checking', 'failed'].includes(v.status) ? `<button onclick="checkVisaNow(${v.id})" class="text-emerald-600 hover:underline text-xs font-bold ml-2">فحص الآن</button>` : ''}
+                ${!['found', 'cancelled'].includes(v.status) ? `<button onclick="stopVisaCheck(${v.id})" class="text-red-500 hover:underline text-xs font-bold">إيقاف</button>` : ''}
+              </td>
+            </tr>`).join('') || '<tr><td colspan="8" class="p-8 text-center text-gray-400">لا توجد فحوصات بعد</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -1626,6 +1796,76 @@ async function renderVisaChecks(area) {
 window.filterVisaChecks = function (status) {
   visaChecksFilter = status;
   render();
+};
+
+window.checkVisaNow = async function (id) {
+  try {
+    await axios.post(`${API}/visa-checks/${id}/check-now`);
+    render();
+  } catch (err) {
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+window.stopVisaCheck = async function (id) {
+  if (!confirm('تأكيد إيقاف هذا الفحص فقط (لن يُعاد المحاولة له مرة أخرى)؟')) return;
+  try {
+    await axios.post(`${API}/visa-checks/${id}/stop`);
+    render();
+  } catch (err) {
+    alert(err?.response?.data?.error || 'حدث خطأ');
+  }
+};
+
+// Print the currently-rendered visa-checks table (respects the active status
+// filter). Uses a dedicated print-only window so the dashboard sidebar/nav
+// chrome never ends up in the printed page.
+window.printVisaChecks = function () {
+  const table = document.getElementById('visa-checks-table');
+  if (!table) return;
+  const w = window.open('', '_blank');
+  w.document.write(`
+    <html dir="rtl"><head><meta charset="utf-8"><title>كشف فحوصات التأشيرات</title>
+    <style>
+      body{font-family:Tahoma,Arial,sans-serif;padding:20px}
+      table{width:100%;border-collapse:collapse;font-size:13px}
+      th,td{border:1px solid #ddd;padding:8px;text-align:right}
+      th{background:#f3f4f6}
+      h2{margin-bottom:4px}
+      p.meta{color:#666;font-size:12px;margin-bottom:16px}
+    </style></head><body>
+    <h2>كشف فحوصات التأشيرات</h2>
+    <p class="meta">تاريخ الطباعة: ${new Date().toLocaleString('ar')} — الفلتر: ${visaChecksFilter || 'الكل'}</p>
+    ${table.outerHTML.replace(/<th class="p-4 font-medium print:hidden">[\s\S]*?<\/th>/, '').replace(/<td class="p-4 print:hidden">[\s\S]*?<\/td>/g, '')}
+    </body></html>
+  `);
+  w.document.close();
+  w.focus();
+  setTimeout(() => w.print(), 300);
+};
+
+// Export the currently-filtered list as a CSV file the office can open in
+// Excel — a lighter-weight alternative to printing for offices that want to
+// keep/forward the data rather than print it physically.
+window.exportVisaChecksCsv = function () {
+  const rows = [['المكتب', 'الاسم', 'رقم الجواز', 'الحالة', 'عدد المحاولات', 'آخر فحص', 'الفحص القادم']];
+  visaChecksCache.forEach(v => {
+    rows.push([
+      v.customer_name || '', v.first_name || '', v.passport_number || '', v.status || '',
+      v.check_count ?? '', v.last_checked_at ? fmtDate(v.last_checked_at) : '',
+      (v.status === 'pending' || v.status === 'checking') && v.next_check_at ? fmtDate(v.next_check_at) : ''
+    ]);
+  });
+  const csv = '\uFEFF' + rows.map(r => r.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `visa-checks-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 };
 
 // ---------------------- Activation/deactivation commands overview ----------------------

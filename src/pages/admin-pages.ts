@@ -108,6 +108,7 @@ export function adminDashboardPage(): string {
         <button data-tab="bridgenumbers" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-sim-card w-5"></i> أرقام الجسر</button>
         <button data-tab="messagelists" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-bullhorn w-5"></i> قوائم الرسائل</button>
         <button data-tab="operations" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-list-check w-5"></i> سجل العمليات</button>
+        <button data-tab="opsanalytics" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-chart-column w-5"></i> تحليلات الاستهلاك</button>
         <div class="pt-3 pb-1 px-4 text-xs text-gray-500 font-bold">الموظف الذكي</div>
         <button data-tab="smartemployee" class="tab-btn w-full text-right flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-gray-800 transition font-medium"><i class="fa-solid fa-robot w-5"></i> المعاملات والوكلاء</button>
         <div class="pt-3 pb-1 px-4 text-xs text-gray-500 font-bold">ضبط الميزات</div>

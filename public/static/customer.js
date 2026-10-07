@@ -509,7 +509,7 @@ async function renderMessageListsBody() {
             <div class="bg-gray-50 rounded-lg p-3 text-sm">
               <div class="flex items-center justify-between">
                 <p class="font-semibold">${l.name} ${l.is_active ? '' : '<span class=\"text-[10px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded-full mr-1\">متوقفة</span>'}</p>
-                <span class="text-xs text-gray-400">${l.schedule_time} — ${recurrenceLabel(l.recurrence)}</span>
+                <span class="text-xs text-gray-400">${l.schedule_time} (UTC+${l.timezone_offset_hours ?? 3}) — ${recurrenceLabel(l.recurrence)}</span>
               </div>
               <p class="text-xs text-gray-500 mt-1 line-clamp-2">${(l.message_text || '').slice(0, 80)}</p>
               <div class="flex items-center justify-between mt-2">
@@ -532,6 +532,15 @@ function recurrenceLabel(r) {
   return r === 'daily' ? 'يومي' : r === 'weekly' ? 'أسبوعي' : r === 'monthly' ? 'شهري' : r;
 }
 
+// Mirrors src/lib/messageLists.ts's COUNTRY_TIMEZONE_OPTIONS (migration 0019).
+const COUNTRY_TIMEZONE_OPTIONS = [
+  { offset: 3, label_ar: 'اليمن / السعودية / العراق (UTC+3)' },
+  { offset: 4, label_ar: 'الإمارات / عمان (UTC+4)' },
+  { offset: 2, label_ar: 'مصر / الأردن / فلسطين (UTC+2)' },
+  { offset: 1, label_ar: 'ليبيا / تونس / الجزائر (UTC+1)' },
+  { offset: 0, label_ar: 'المغرب (UTC+0)' }
+];
+
 // ---- Contact modal ----
 window.openMlContactModal = function (id) {
   const ct = id ? mlContactsCache.find(c => c.id === id) : null;
@@ -542,11 +551,19 @@ window.openMlContactModal = function (id) {
         <h3 class="font-bold text-lg mb-4">${ct ? 'تعديل جهة اتصال' : 'جهة اتصال جديدة'}</h3>
         <div class="space-y-3">
           <input id="mc-name" value="${ct ? ct.name : ''}" placeholder="الاسم (مثال: وكيل صنعاء - أحمد)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
-          <select id="mc-channel" class="w-full border border-gray-200 rounded-xl px-4 py-2.5">
+          <select id="mc-channel" onchange="document.getElementById('mc-group-resolve-box').classList.toggle('hidden', this.value !== 'group')" class="w-full border border-gray-200 rounded-xl px-4 py-2.5">
             <option value="number" ${!ct || ct.channel === 'number' ? 'selected' : ''}>رقم واتساب فردي</option>
             <option value="group" ${ct && ct.channel === 'group' ? 'selected' : ''}>مجموعة واتساب (JID)</option>
           </select>
           <input id="mc-value" value="${ct ? ct.value : ''}" dir="ltr" placeholder="رقم الهاتف (967778260004) أو JID المجموعة" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
+          <div id="mc-group-resolve-box" class="${!ct || ct.channel === 'group' ? '' : 'hidden'} bg-gray-50 rounded-xl p-3 space-y-2">
+            <p class="text-xs text-gray-500">بدلاً من كتابة JID المجموعة يدوياً، الصق رابط دعوة المجموعة هنا وسيتم التعرّف على المعرّف تلقائياً (يتطلب أن يكون أحد أرقام الجسر المفعّلة عضواً بالفعل في المجموعة):</p>
+            <div class="flex gap-2">
+              <input id="mc-invite-link" dir="ltr" placeholder="https://chat.whatsapp.com/XXXXXXXXXX" class="flex-1 border border-gray-200 rounded-xl px-3 py-2 text-sm" />
+              <button type="button" onclick="resolveGroupInviteLink()" class="bg-gray-700 hover:bg-gray-800 text-white text-xs font-bold px-3 rounded-lg whitespace-nowrap">تعرّف</button>
+            </div>
+            <div id="mc-resolve-status" class="text-xs"></div>
+          </div>
           <input id="mc-region" value="${ct && ct.region ? ct.region : ''}" placeholder="المنطقة (اختياري، مثال: صنعاء)" class="w-full border border-gray-200 rounded-xl px-4 py-2.5" />
         </div>
         <div id="mc-error" class="hidden text-red-600 text-xs bg-red-50 rounded-lg p-2 mt-3"></div>
@@ -558,6 +575,54 @@ window.openMlContactModal = function (id) {
     </div>
   `;
 };
+
+// Group invite-link → JID resolver (migration 0019), self-service version.
+// See admin.js for the full explanation — only succeeds if an
+// already-activated bridge number is already a member of the group; no
+// joining is ever attempted.
+window.resolveGroupInviteLink = async function () {
+  const link = document.getElementById('mc-invite-link').value.trim();
+  const statusEl = document.getElementById('mc-resolve-status');
+  if (!link) { statusEl.innerHTML = '<span class="text-red-500">الصق رابط دعوة المجموعة أولاً</span>'; return; }
+  statusEl.innerHTML = '<span class="text-gray-500"><i class="fa-solid fa-spinner fa-spin"></i> جاري إرسال الطلب...</span>';
+  try {
+    const { data } = await axios.post(`${API}/group-resolve-jobs`, { invite_link: link });
+    pollGroupResolveJob(data.job_id, 0);
+  } catch (err) {
+    statusEl.innerHTML = `<span class="text-red-500">${err?.response?.data?.error || 'حدث خطأ'}</span>`;
+  }
+};
+
+function pollGroupResolveJob(jobId, attempt) {
+  const statusEl = document.getElementById('mc-resolve-status');
+  if (!statusEl) return;
+  if (attempt > 20) {
+    statusEl.innerHTML = '<span class="text-red-500">انتهت مهلة الانتظار. تأكد من أن أحد أرقام الجسر المفعّلة عضو في المجموعة ثم حاول مجدداً.</span>';
+    return;
+  }
+  statusEl.innerHTML = `<span class="text-gray-500"><i class="fa-solid fa-spinner fa-spin"></i> جاري التعرّف على المجموعة... (${attempt + 1})</span>`;
+  setTimeout(async () => {
+    try {
+      const { data } = await axios.get(`${API}/group-resolve-jobs/${jobId}`);
+      const job = data.job;
+      const statusEl2 = document.getElementById('mc-resolve-status');
+      if (!statusEl2) return;
+      if (job.status === 'resolved') {
+        document.getElementById('mc-value').value = job.resolved_jid;
+        const nameEl = document.getElementById('mc-name');
+        if (nameEl && !nameEl.value.trim() && job.resolved_group_name) nameEl.value = job.resolved_group_name;
+        statusEl2.innerHTML = `<span class="text-emerald-600"><i class="fa-solid fa-check"></i> تم التعرّف على المجموعة: ${job.resolved_group_name || ''}</span>`;
+      } else if (job.status === 'failed') {
+        statusEl2.innerHTML = `<span class="text-red-500">${job.error || 'تعذّر التعرّف على المجموعة'}</span>`;
+      } else {
+        pollGroupResolveJob(jobId, attempt + 1);
+      }
+    } catch (err) {
+      const statusEl3 = document.getElementById('mc-resolve-status');
+      if (statusEl3) statusEl3.innerHTML = `<span class="text-red-500">${err?.response?.data?.error || 'حدث خطأ'}</span>`;
+    }
+  }, 2000);
+}
 
 window.submitMlContact = async function (id) {
   const payload = {
@@ -593,7 +658,7 @@ window.openMlListModal = async function (id) {
     list = data.list;
     recipientIds = (data.recipients || []).map(r => r.id);
   }
-  const l = list || { name: '', message_type: '', message_text: '', schedule_time: '19:00', recurrence: 'daily', schedule_days: null, target_region: '', is_active: 1 };
+  const l = list || { name: '', message_type: '', message_text: '', schedule_time: '19:00', recurrence: 'daily', schedule_days: null, target_region: '', is_active: 1, timezone_offset_hours: 3 };
   let days = [];
   try { days = l.schedule_days ? JSON.parse(l.schedule_days) : []; } catch { days = []; }
 
@@ -614,6 +679,12 @@ window.openMlListModal = async function (id) {
               <option value="daily" ${l.recurrence === 'daily' ? 'selected' : ''}>يومي</option>
               <option value="weekly" ${l.recurrence === 'weekly' ? 'selected' : ''}>أسبوعي</option>
               <option value="monthly" ${l.recurrence === 'monthly' ? 'selected' : ''}>شهري</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-xs text-gray-500 block mb-1">توقيت القائمة (حسب البلد المستهدف)</label>
+            <select id="ml-timezone" class="w-full border border-gray-200 rounded-xl px-4 py-2.5">
+              ${COUNTRY_TIMEZONE_OPTIONS.map(o => `<option value="${o.offset}" ${Number(l.timezone_offset_hours ?? 3) === o.offset ? 'selected' : ''}>${o.label_ar}</option>`).join('')}
             </select>
           </div>
           <div id="ml-days-box">
@@ -669,6 +740,7 @@ window.submitMlList = async function (id) {
     schedule_time: document.getElementById('ml-time').value,
     recurrence,
     schedule_days,
+    timezone_offset_hours: Number(document.getElementById('ml-timezone').value),
     target_region: document.getElementById('ml-region').value.trim() || null,
     is_active: document.getElementById('ml-active').checked,
     recipient_contact_ids
